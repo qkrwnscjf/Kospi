@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background-base: #050506;
+    --background-deep: #020203;
+    --background-elevated: #0a0a0c;
+    --foreground: #EDEDEF;
+    --foreground-muted: #8A8F98;
+    --accent: #5E6AD2;
+    --accent-bright: #6872D9;
+    --border-default: rgba(255, 255, 255, 0.06);
+    --border-hover: rgba(255, 255, 255, 0.10);
+  }
+
+  body {
+    @apply bg-background-base text-foreground antialiased selection:bg-accent/30;
+    font-family: "Inter", "Geist Sans", system-ui, sans-serif;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-gradient-to-b from-white via-white/95 to-white/70 bg-clip-text text-transparent;
+  }
+  
+  .text-gradient-accent {
+    @apply bg-gradient-to-r from-[#5E6AD2] via-indigo-400 to-[#5E6AD2] bg-clip-text text-transparent;
+    background-size: 200% 100%;
+    animation: shimmer 2s linear infinite;
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-20px) rotate(1deg); }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-background-deep;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-white/10 rounded-full hover:bg-white/20 transition-colors;
+}
+
+/* Chart Tooltip Styles */
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+.recharts-default-tooltip {
+  @apply !bg-background-elevated/90 !backdrop-blur-xl !border-white/10 !rounded-lg !shadow-2xl !p-2 !text-xs !font-medium !text-foreground !border !shadow-[0_8px_32px_rgba(0,0,0,0.5)];
+}
