@@ -1,0 +1,129 @@
+<svg width="1000" height="600" viewBox="0 0 1000 600" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1000" height="600" rx="16" fill="#0A0A0C"/>
+  <rect width="1000" height="600" rx="16" fill="url(#noise)" opacity="0.05"/>
+  
+  <defs>
+    <linearGradient id="gradSource" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2D3748" />
+      <stop offset="100%" stop-color="#1A202C" />
+    </linearGradient>
+    <linearGradient id="gradWorker" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4C51BF" />
+      <stop offset="100%" stop-color="#434190" />
+    </linearGradient>
+    <linearGradient id="gradKafka" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E53E3E" />
+      <stop offset="100%" stop-color="#C53030" />
+    </linearGradient>
+    <linearGradient id="gradBackend" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2B6CB0" />
+      <stop offset="100%" stop-color="#2C5282" />
+    </linearGradient>
+    <linearGradient id="gradDB" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38A169" />
+      <stop offset="100%" stop-color="#276749" />
+    </linearGradient>
+    <linearGradient id="gradFrontend" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D69E2E" />
+      <stop offset="100%" stop-color="#B7791F" />
+    </linearGradient>
+    
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#718096" />
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#48BB78" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4299E1" />
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="500" y="50" font-family="monospace" font-size="24" font-weight="bold" fill="#E2E8F0" text-anchor="middle">KOSPI Insight Terminal - Lambda Architecture Pipeline</text>
+
+  <!-- 1. External Data Sources -->
+  <g transform="translate(50, 150)">
+    <rect width="180" height="60" rx="8" fill="url(#gradSource)" stroke="#4A5568" stroke-width="2"/>
+    <text x="90" y="35" font-family="sans-serif" font-size="16" fill="#F7FAFC" text-anchor="middle" font-weight="bold">Yahoo Finance</text>
+  </g>
+  <g transform="translate(50, 250)">
+    <rect width="180" height="60" rx="8" fill="url(#gradSource)" stroke="#4A5568" stroke-width="2"/>
+    <text x="90" y="35" font-family="sans-serif" font-size="16" fill="#F7FAFC" text-anchor="middle" font-weight="bold">Naver Finance</text>
+  </g>
+
+  <!-- 2. Data Ingestion Worker -->
+  <g transform="translate(300, 200)">
+    <rect width="180" height="80" rx="8" fill="url(#gradWorker)" stroke="#5A67D8" stroke-width="2"/>
+    <text x="90" y="35" font-family="sans-serif" font-size="16" fill="#FFFFFF" text-anchor="middle" font-weight="bold">Ingestion Worker</text>
+    <text x="90" y="55" font-family="sans-serif" font-size="12" fill="#E2E8F0" text-anchor="middle">(Node.js Daemon)</text>
+  </g>
+
+  <!-- 3. Apache Kafka -->
+  <g transform="translate(550, 200)">
+    <rect width="180" height="80" rx="8" fill="url(#gradKafka)" stroke="#F56565" stroke-width="2"/>
+    <text x="90" y="35" font-family="sans-serif" font-size="16" fill="#FFFFFF" text-anchor="middle" font-weight="bold">Apache Kafka</text>
+    <text x="90" y="55" font-family="sans-serif" font-size="12" fill="#FED7D7" text-anchor="middle">Topic: market-ticks</text>
+  </g>
+
+  <!-- 4. Fastify Backend -->
+  <g transform="translate(550, 360)">
+    <rect width="180" height="100" rx="8" fill="url(#gradBackend)" stroke="#4299E1" stroke-width="2"/>
+    <text x="90" y="35" font-family="sans-serif" font-size="16" fill="#FFFFFF" text-anchor="middle" font-weight="bold">Backend Server</text>
+    <text x="90" y="55" font-family="sans-serif" font-size="12" fill="#EBF8FF" text-anchor="middle">(Fastify + Socket.io)</text>
+    <text x="90" y="75" font-family="sans-serif" font-size="12" fill="#BEE3F8" text-anchor="middle">Speed &amp; Batch Layer</text>
+  </g>
+
+  <!-- 5. Databases -->
+  <g transform="translate(300, 340)">
+    <rect width="160" height="60" rx="8" fill="url(#gradDB)" stroke="#48BB78" stroke-width="2"/>
+    <text x="80" y="35" font-family="sans-serif" font-size="16" fill="#FFFFFF" text-anchor="middle" font-weight="bold">Redis</text>
+  </g>
+  <g transform="translate(300, 430)">
+    <rect width="160" height="60" rx="8" fill="url(#gradDB)" stroke="#48BB78" stroke-width="2"/>
+    <text x="80" y="25" font-family="sans-serif" font-size="16" fill="#FFFFFF" text-anchor="middle" font-weight="bold">TimescaleDB</text>
+    <text x="80" y="45" font-family="sans-serif" font-size="12" fill="#C6F6D5" text-anchor="middle">(PostgreSQL)</text>
+  </g>
+
+  <!-- 6. Frontend -->
+  <g transform="translate(800, 360)">
+    <rect width="160" height="100" rx="8" fill="url(#gradFrontend)" stroke="#ECC94B" stroke-width="2"/>
+    <text x="80" y="45" font-family="sans-serif" font-size="16" fill="#FFFFFF" text-anchor="middle" font-weight="bold">React Frontend</text>
+    <text x="80" y="65" font-family="sans-serif" font-size="12" fill="#FEFCBF" text-anchor="middle">Dashboard UI</text>
+  </g>
+
+  <!-- Arrows & Lines -->
+  <!-- Sources to Worker -->
+  <path d="M 230 180 L 265 180 L 265 220 L 295 220" stroke="#718096" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 230 280 L 265 280 L 265 260 L 295 260" stroke="#718096" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <text x="260" y="200" font-family="sans-serif" font-size="10" fill="#A0AEC0">Polling</text>
+
+  <!-- Worker to Kafka -->
+  <path d="M 480 240 L 545 240" stroke="#718096" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <text x="515" y="230" font-family="sans-serif" font-size="10" fill="#A0AEC0" text-anchor="middle">Produce</text>
+
+  <!-- Kafka to Backend -->
+  <path d="M 640 280 L 640 355" stroke="#718096" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <text x="650" y="325" font-family="sans-serif" font-size="10" fill="#A0AEC0">Consume</text>
+
+  <!-- Backend to DBs -->
+  <path d="M 550 380 L 465 380" stroke="#48BB78" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <text x="505" y="375" font-family="sans-serif" font-size="10" fill="#9AE6B4" text-anchor="middle">Cache Tick</text>
+
+  <path d="M 550 450 L 465 450" stroke="#48BB78" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <text x="505" y="445" font-family="sans-serif" font-size="10" fill="#9AE6B4" text-anchor="middle">Insert TS</text>
+
+  <!-- Backend to Frontend -->
+  <!-- WebSocket -->
+  <path d="M 730 390 L 795 390" stroke="#4299E1" stroke-width="2" stroke-dasharray="4" fill="none" marker-end="url(#arrow-blue)"/>
+  <text x="765" y="380" font-family="sans-serif" font-size="10" fill="#63B3ED" text-anchor="middle">WebSocket</text>
+  
+  <!-- REST API -->
+  <path d="M 730 430 L 795 430" stroke="#718096" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <text x="765" y="420" font-family="sans-serif" font-size="10" fill="#A0AEC0" text-anchor="middle">REST API</text>
+
+  <!-- Data flow description -->
+  <text x="500" y="550" font-family="sans-serif" font-size="14" fill="#A0AEC0" text-anchor="middle">Speed Layer (WebSocket) handles real-time streams / Batch Layer (REST) serves historical aggregation</text>
+
+</svg>

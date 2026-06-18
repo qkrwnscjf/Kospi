@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { AreaChart, Area, ResponsiveContainer, YAxis, Tooltip, XAxis, CartesianGrid } from 'recharts'
 import { TrendingUp, TrendingDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useMarketData } from '@/hooks/useMarketData'
 
 interface ChartCardProps {
   title: string
@@ -10,15 +11,22 @@ interface ChartCardProps {
   change: string
   isUp: boolean
   data: any[]
+  symbol?: string
 }
 
 const TIME_RANGES = ['실시간', '1일', '1주', '1개월', '3개월', '1년']
 
-export function ChartCard({ title, current, change, isUp, data }: ChartCardProps) {
+export function ChartCard({ title, current, change, isUp: initialIsUp, data, symbol }: ChartCardProps) {
   const cardRef = useRef<HTMLDivElement>(null)
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 })
   const [isHovered, setIsHovered] = useState(false)
   const [activeRange, setActiveRange] = useState('실시간')
+
+  const { currentPrice, priceChange, chartData } = useMarketData(symbol || '', data, activeRange)
+
+  const displayCurrent = currentPrice !== null ? currentPrice.toLocaleString() : current
+  const displayChange = priceChange !== null ? (priceChange > 0 ? `+${priceChange.toFixed(2)}` : priceChange.toFixed(2)) : change
+  const isUp = priceChange !== null ? priceChange > 0 : initialIsUp
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!cardRef.current) return
@@ -37,6 +45,22 @@ export function ChartCard({ title, current, change, isUp, data }: ChartCardProps
     if (value > 1000) return value.toLocaleString()
     return value.toFixed(1)
   }
+
+  const formatXAxis = (tickItem: any) => {
+    if (typeof tickItem !== 'number') return tickItem;
+    const date = new Date(tickItem);
+    
+    if (activeRange === '실시간') {
+      return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`;
+    } else if (activeRange === '1일') {
+      return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+    } else if (activeRange === '1주' || activeRange === '1개월' || activeRange === '3개월') {
+      return `${date.getMonth() + 1}/${date.getDate()}`;
+    } else if (activeRange === '1년') {
+      return `${date.getFullYear().toString().slice(-2)}/${date.getMonth() + 1}`;
+    }
+    return tickItem;
+  };
 
   return (
     <motion.div
@@ -83,7 +107,7 @@ export function ChartCard({ title, current, change, isUp, data }: ChartCardProps
               {title}
             </h3>
             <div className="text-2xl font-bold text-gradient">
-              {current}
+              {displayCurrent}
             </div>
           </div>
           <div className={cn(
@@ -93,7 +117,7 @@ export function ChartCard({ title, current, change, isUp, data }: ChartCardProps
               : "text-red-400 bg-red-400/5 border-red-400/20 shadow-[0_0_20px_rgba(248,113,113,0.1)]"
           )}>
             {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-            {change}
+            {displayChange}{typeof displayChange === 'number' && !title.includes('환율') && !title.includes('USD') ? '%' : ''}
           </div>
         </div>
 
@@ -117,7 +141,7 @@ export function ChartCard({ title, current, change, isUp, data }: ChartCardProps
 
         <div className="flex-1 -mx-2 mb-2 relative">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+            <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
               <defs>
                 <linearGradient id={`gradient-${title}`} x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor={isUp ? "#4ade80" : "#f87171"} stopOpacity={0.15} />
@@ -149,6 +173,7 @@ export function ChartCard({ title, current, change, isUp, data }: ChartCardProps
                 tickLine={false}
                 tick={{ fill: 'rgba(138, 143, 152, 0.5)', fontSize: 10, fontFamily: 'monospace' }}
                 minTickGap={30}
+                tickFormatter={formatXAxis}
               />
               <YAxis 
                 orientation="right"

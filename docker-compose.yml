@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # Zookeeper (Required for Kafka cluster coordination)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    container_name: kospi-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  # Apache Kafka (Message Queue)
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    container_name: kospi-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  # Redis (Caching Layer)
+  redis:
+    image: redis:alpine
+    container_name: kospi-redis
+    ports:
+      - "6379:6379"
+
+  # TimescaleDB (Time-series Database based on PostgreSQL)
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    container_name: kospi-timescaledb
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: kospi
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+
+volumes:
+  timescaledb_data:
