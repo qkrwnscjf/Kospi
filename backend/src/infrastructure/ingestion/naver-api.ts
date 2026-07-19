@@ -7,9 +7,11 @@ const NAVER_POLLING_URL = 'https://polling.finance.naver.com/api/realtime';
 const NAVER_INDICES = {
   // Sector and Specific indices
   VKOSPI: 'SERVICE_INDEX:VKOSPI',
-  // Note: For KRX Sectors (e.g., KRX 반도체, KRX 자동차), you need to find the specific 
-  // Naver index code (e.g., SERVICE_INDEX:KRX100 or similar)
-  KRX_SEMI: 'SERVICE_INDEX:WMI510', // Placeholder example code
+  KRX_SEMI: 'SERVICE_INDEX:WMI510',     // 반도체
+  KRX_IT: 'SERVICE_INDEX:WMI500',       // IT
+  KRX_AUTO: 'SERVICE_INDEX:WMI330',     // 자동차
+  KRX_BANK: 'SERVICE_INDEX:WMI540',     // 은행
+  KRX_BIO: 'SERVICE_INDEX:WMI340',      // 제약/바이오
 };
 
 type NaverSymbolKey = keyof typeof NAVER_INDICES;

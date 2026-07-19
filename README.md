@@ -1,115 +1,77 @@
-# KOSPI Insight Terminal 
+# KOSPI Insight Dashboard
 
-국내외 거시 경제, 환율, 그리고 핵심 섹터 모멘텀을 실시간으로 추적하여 자금의 흐름을 한눈에 파악할 수 있는 프리미엄 인터랙티브 금융 대시보드입니다.
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat&logo=typescript&logoColor=white)
+![React](https://img.shields.io/badge/React-20232A?style=flat&logo=react&logoColor=61DAFB)
+![Fastify](https://img.shields.io/badge/Fastify-000000?style=flat&logo=fastify&logoColor=white)
+![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat&logo=apache-kafka&logoColor=white)
+![TimescaleDB](https://img.shields.io/badge/TimescaleDB-FDB515?style=flat&logo=postgresql&logoColor=black)
+![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat&logo=redis&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-F46800?style=flat&logo=grafana&logoColor=white)
 
-![Pipeline](./docs/pipeline.svg)
+대규모 트래픽과 실시간 금융 데이터를 지연 없이 처리하기 위해 **Lambda 아키텍처(MSA)** 기반으로 설계된 클라우드 네이티브 실시간 주식 대시보드입니다.
 
----
+## 핵심 기능 (Key Features)
 
-## 프로젝트 개요 (Overview)
-기존의 정적인 금융 데이터 제공 방식에서 벗어나, **람다 아키텍처(Lambda Architecture)**를 적용하여 실시간 스트리밍(Speed Layer)과 대규모 과거 시계열 데이터(Batch Layer)를 완벽하게 분리, 통합 렌더링하는 풀스택 모니터링 시스템입니다.
-Linear, Vercel 스타일의 다크 모드 기반 프리미엄 UI/UX 디자인을 제공합니다.
+- **실시간 웹소켓 스트리밍**: 카프카(Kafka) 버퍼링을 거친 가격 데이터가 Socket.io를 통해 프론트엔드로 100ms 이내에 푸시됩니다.
+- **캐싱 기반 초고속 렌더링**: 무거운 과거 차트 데이터는 외부 API를 매번 호출하지 않고 Redis에 300초간 캐싱하여 즉각적으로 반환합니다.
+- **시계열 아카이빙**: 수집된 모든 틱(Tick) 데이터는 PostgreSQL 기반의 시계열 최적화 DB인 TimescaleDB에 영구적으로 압축 보관됩니다.
+- **무중단 운영 모니터링**: Prometheus와 Grafana를 통한 카프카 트래픽 및 컨테이너 헬스체크 대시보드가 내장되어 있습니다.
 
-## 기술 스택 (Tech Stack)
+## 아키텍처 (Architecture)
 
-### Frontend (Dashboard)
-- **Framework**: React 18 (TypeScript), Vite
-- **Styling**: Tailwind CSS, CSS Modules
-- **Animation/Chart**: Framer Motion, Recharts
-- **State/Real-time**: Socket.IO-client, React Hooks
+1. **Ingestion Worker**: 10초마다 야후/네이버 금융 API에서 국내외 12개 주요 지표 데이터를 수집.
+2. **Message Queue**: 수집된 데이터를 Kafka `market-ticks` 토픽으로 Produce하여 병목 방지 및 시스템 분리.
+3. **Backend API**: 카프카를 실시간으로 Consume하여 브라우저에 WebSocket으로 전달하고, DB/Redis와 통신하여 REST API를 제공.
+4. **Frontend UI**: React + Vite 기반의 다크모드 대시보드가 실시간 데이터에 맞춰 시각적으로 깜빡이며 반응 (Nginx 서빙).
 
-### Backend (Data Pipeline & API)
-- **Server**: Node.js, Fastify
-- **Real-time**: Socket.IO
-- **Data Ingestion**: `yahoo-finance2`, `axios` (Naver unofficial API)
-- **Message Queue**: Apache Kafka (`kafkajs`), Zookeeper
-- **Database / Cache**: TimescaleDB (PostgreSQL), Redis
-- **Infra**: Docker, Docker Compose
-
----
-
-## 아키텍처 및 파이프라인 (Architecture)
-
-본 시스템은 지연을 최소화하고 확장성을 확보하기 위해 다음과 같은 파이프라인으로 동작합니다.
-
-1. **데이터 수집 (Ingestion Worker)**
-   - `yahoo-api.ts` 및 `naver-api.ts` 데몬이 10초 주기로 전 세계 시장 데이터를 폴링합니다.
-   - 받아온 데이터를 통일된 포맷(`NormalizedMarketData`)으로 정제하여 Kafka에 발행(Produce)합니다.
-2. **실시간 스트리밍 (Speed Layer)**
-   - Fastify 백엔드가 Kafka Topic(`market-ticks`)을 즉시 소비(Consume)합니다.
-   - Redis에 최신 상태를 캐싱한 뒤, 클라이언트와 연결된 WebSocket(Socket.IO)을 통해 차트에 틱 데이터를 브로드캐스팅합니다.
-3. **과거 시계열 조회 (Batch Layer)**
-   - Kafka에서 파생된 데이터가 지속적으로 TimescaleDB에 적재됩니다.
-   - 프론트엔드에서 특정 기간(1주일, 1개월 등) 조회 요청 시, `Continuous Aggregates` 기능으로 자동 리샘플링된 데이터를 REST API로 응답합니다.
+> 💡 더 자세한 내부 구조와 클라우드 확장 전략은 아래 문서를 참고하세요.
+> * [파이프라인 상세 명세서 (docs/architecture.md)](docs/architecture.md)
+> * [클라우드 네이티브 전환 전략 (docs/cloud.md)](docs/cloud.md)
 
 ---
 
-## 디렉토리 구조 (Directory Structure)
+## 시작하기 (Quick Start)
 
-```text
-kospi/
-├── frontend/                 # React UI 클라이언트 영역
-│   ├── src/
-│   │   ├── components/       # ChartCard, DashboardGrid 등 메인 컴포넌트
-│   │   ├── hooks/            # useMarketData (Socket, REST 통합 훅)
-│   │   ├── constants/        # 카테고리 구성 데이터
-│   │   └── ...
-│   └── package.json
-├── backend/                  # Fastify 서버 및 파이프라인 영역
-│   ├── src/
-│   │   ├── domains/          # history, market 컨트롤러 및 게이트웨이
-│   │   ├── infrastructure/   # Redis, Kafka 연결 및 수집 데몬(ingestion)
-│   │   └── shared/           # 공통 타입
-│   └── package.json
-├── docs/                     # 설계 문서 및 다이어그램
-└── docker-compose.yml        # Kafka, Redis, DB 인프라 세팅 파일
-```
+이 프로젝트는 100% Docker로 컨테이너화되어 있습니다. 복잡한 환경 설정이나 패키지 설치 없이 명령어 단 한 줄로 **10개의 서비스(DB, 캐시, 카프카, 백엔드, 프론트엔드, 모니터링 등)**가 자동으로 기동됩니다.
 
----
+### 요구 사항
+- Docker 및 Docker Compose 설치
 
-## 실행 가이드라인 (Getting Started)
-
-프로젝트를 로컬 환경에서 구동하기 위한 방법입니다.
-
-### 1. 필수 조건 (Prerequisites)
-- [Node.js](https://nodejs.org/en/) (v18 이상 권장)
-- [Docker & Docker Compose](https://www.docker.com/) 설치 및 실행 중
-
-### 2. 구동 순서
-
-**Step 1: 인프라 컨테이너 실행**
-프로젝트 루트 폴더에서 Kafka, Redis, TimescaleDB를 백그라운드 환경으로 실행합니다.
+### 1. 프로젝트 실행
 ```bash
-docker-compose up -d
+# 레포지토리 클론 후 최상단 디렉토리에서 실행
+docker-compose up -d --build
 ```
+> 초기 기동 시 Kafka와 TimescaleDB가 켜지는 데 약 15~20초가 소요됩니다.
 
-**Step 2: 백엔드 API 서버 실행**
-새로운 터미널을 열고 백엔드 의존성을 설치한 후 서버를 구동합니다.
+### 2. 서비스 접속 포트 안내
+
+모든 컨테이너가 켜진 후, 브라우저에서 아래 주소로 접속하세요.
+
+| 서비스 명 | 접속 주소 | 설명 / 계정 |
+| :--- | :--- | :--- |
+| **프론트엔드 대시보드** | `http://localhost:5173` | 메인 UI |
+| **백엔드 API 서버** | `http://localhost:3001` | REST API 및 WebSocket 통신 포트 |
+| **Grafana 모니터링** | `http://localhost:3000` | 인프라 감시 (초기 ID: `admin` / PW: `admin`) |
+
+## 개발 환경 및 로컬 실행 (Local Development)
+
+도커를 사용하지 않고 직접 코드를 수정하며 개발할 경우 아래 명령어를 참고하세요. (단, Kafka와 DB 도커는 띄워져 있어야 합니다.)
+
 ```bash
+# 백엔드 서버 실행
 cd backend
 npm install
 npm run dev
-```
 
-**Step 3: 데이터 수집 데몬(Worker) 실행**
-새로운 터미널을 열고 백엔드 폴더에서 인제스천 워커를 단독으로 구동시킵니다.
-```bash
-cd backend
-npm run ingestion
-```
-
-**Step 4: 프론트엔드 대시보드 실행**
-새로운 터미널을 열고 프론트엔드 의존성을 설치한 후 클라이언트를 띄웁니다.
-```bash
+# 프론트엔드 서버 실행
 cd frontend
 npm install
 npm run dev
 ```
 
-브라우저에서 `http://localhost:5173` 으로 접속하시면 실시간으로 작동하는 프리미엄 대시보드를 확인할 수 있습니다.
+## 라이선스 (License)
 
----
-
-## 🙏 Acknowledgments (Credits)
-
-본 프로젝트의 프론트엔드 UI/UX 설계 및 디자인 프롬프트 양식은 [Design Prompts (https://www.designprompts.dev/)](https://www.designprompts.dev/) 의 가이드라인을 영감받아 작성 및 적용되었습니다. 훌륭한 디자인 리소스를 제공해 주셔서 감사합니다.
+This project is licensed under the MIT License - see the LICENSE file for details.

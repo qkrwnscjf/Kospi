@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # Zookeeper (Required for Kafka cluster coordination)
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.3.0
+    image: confluentinc/cp-zookeeper:7.5.0
     container_name: kospi-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
@@ -13,7 +13,7 @@ services:
 
   # Apache Kafka (Message Queue)
   kafka:
-    image: confluentinc/cp-kafka:7.3.0
+    image: confluentinc/cp-kafka:7.5.0
     container_name: kospi-kafka
     depends_on:
       - zookeeper
@@ -47,5 +47,91 @@ services:
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
 
+  # Backend API Server
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kospi-backend
+    restart: on-failure
+    ports:
+      - "3001:3001"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - DB_NAME=kospi
+      - KAFKA_BROKERS=kafka:29092
+    depends_on:
+      - kafka
+      - redis
+      - timescaledb
+
+  # Data Ingestion Worker
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kospi-worker
+    restart: on-failure
+    command: ["node", "dist/infrastructure/ingestion/worker.js"]
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - DB_NAME=kospi
+      - KAFKA_BROKERS=kafka:29092
+    depends_on:
+      - kafka
+      - timescaledb
+
+  # Frontend UI (Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: kospi-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+  # --- Monitoring Stack ---
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: kospi-kafka-exporter
+    command: ["--kafka.server=kafka:29092"]
+    ports:
+      - "9308:9308"
+    depends_on:
+      - kafka
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: kospi-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - kafka-exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: kospi-grafana
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   timescaledb_data:
+  prometheus_data:
+  grafana_data:

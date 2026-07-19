@@ -1,0 +1,1 @@
+{"version":3,"file":"market.service.d.ts","sourceRoot":"","sources":["market.service.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,QAAQ,EAAE,MAAM,uBAAuB,CAAC;AAEtD,qBAAa,aAAa;IAClB,cAAc,CAAC,IAAI,EAAE,QAAQ;IAK7B,aAAa,CAAC,MAAM,EAAE,MAAM,GAAG,OAAO,CAAC,QAAQ,GAAG,IAAI,CAAC;CAI9D;AAED,eAAO,MAAM,aAAa,eAAsB,CAAC"}

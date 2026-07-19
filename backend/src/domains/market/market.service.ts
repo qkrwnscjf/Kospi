@@ -1,5 +1,5 @@
-import { redis } from '../../infrastructure/redis';
-import { TickData } from '../../shared/types';
+import { redis } from '../../infrastructure/redis.js';
+import type { TickData } from '../../shared/types.js';
 
 export class MarketService {
   async saveLatestTick(tick: TickData) {

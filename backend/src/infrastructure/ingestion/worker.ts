@@ -23,7 +23,37 @@ async function runIngestionWorker() {
       const allData = [...yahooData, ...naverData];
 
       if (allData.length > 0) {
-        console.log(`Successfully fetched ${allData.length} items. Sending to Kafka...`);
+        console.log(`Successfully fetched ${allData.length} items. Sending to Kafka and DB...`);
+        
+        // --- 1. DB 적재 (TimescaleDB) ---
+        const { dbPool } = await import('../db.js');
+        const client = await dbPool.connect();
+        try {
+          await client.query('BEGIN');
+          for (const data of allData) {
+            await client.query(
+              `INSERT INTO market_ticks (time, symbol, category, price, change_rate, change_price, volume)
+               VALUES (to_timestamp($1 / 1000.0), $2, $3, $4, $5, $6, $7)`,
+              [
+                data.timestamp || Date.now(),
+                data.ticker,
+                data.category,
+                data.price,
+                data.changeRate,
+                data.changePrice,
+                data.volume || null
+              ]
+            );
+          }
+          await client.query('COMMIT');
+        } catch (dbErr) {
+          await client.query('ROLLBACK');
+          console.error('Failed to insert into TimescaleDB:', dbErr);
+        } finally {
+          client.release();
+        }
+
+        // --- 2. Kafka 전송 ---
         
         const messages = allData.map(data => {
           // Map ticker to symbol for internal TickData usage

@@ -1,7 +1,7 @@
 import { Server, Socket } from 'socket.io';
-import { consumer } from '../../infrastructure/kafka';
-import { marketService } from './market.service';
-import { TickData } from '../../shared/types';
+import { consumer } from '../../infrastructure/kafka.js';
+import { marketService } from './market.service.js';
+import type { TickData } from '../../shared/types.js';
 
 export const initMarketGateway = async (io: Server) => {
   try {

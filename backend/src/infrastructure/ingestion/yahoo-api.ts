@@ -1,5 +1,7 @@
-import yahooFinance from 'yahoo-finance2';
+import YahooFinance from 'yahoo-finance2';
 import type { NormalizedMarketData } from './normalizer.js';
+
+const yahooFinance = new YahooFinance();
 
 const YAHOO_SYMBOLS = {
   // Domestic

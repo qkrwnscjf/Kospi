@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils'
 import { LayoutDashboard, Globe, TrendingUp, Activity, Terminal } from 'lucide-react'
 import { motion } from 'framer-motion'
+import { useMarketData } from '@/hooks/useMarketData'
 
 const CATEGORIES = [
   { id: 'category1', name: '국내 전광판', icon: LayoutDashboard },
@@ -15,6 +16,9 @@ interface HeaderProps {
 }
 
 export function Header({ activeCategory, onCategoryChange }: HeaderProps) {
+  const { currentPrice: kospiPrice } = useMarketData('KOSPI', [], '실시간');
+  const { currentPrice: usdPrice } = useMarketData('USD/KRW', [], '실시간');
+
   return (
     <header className="w-full pt-16 pb-8 relative flex flex-col items-center">
       {/* Absolute top-right indices */}
@@ -22,12 +26,16 @@ export function Header({ activeCategory, onCategoryChange }: HeaderProps) {
         <div className="flex items-center gap-4 px-4 py-1.5 bg-white/[0.03] rounded-full border border-white/[0.06] shadow-lg backdrop-blur-md">
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-mono text-foreground-muted uppercase">KOSPI</span>
-            <span className="text-xs font-bold text-green-400">2,623.29</span>
+            <span className={cn("text-xs font-bold transition-colors duration-300", kospiPrice ? "text-green-400" : "text-gray-400 animate-pulse")}>
+              {kospiPrice ? kospiPrice.toLocaleString() : "로딩중..."}
+            </span>
           </div>
           <div className="w-[1px] h-3 bg-white/10" />
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-mono text-foreground-muted uppercase">USD/KRW</span>
-            <span className="text-xs font-bold text-red-400">1,372.5</span>
+            <span className={cn("text-xs font-bold transition-colors duration-300", usdPrice ? "text-red-400" : "text-gray-400 animate-pulse")}>
+              {usdPrice ? usdPrice.toLocaleString() : "로딩중..."}
+            </span>
           </div>
         </div>
         <div className="flex items-center gap-2">

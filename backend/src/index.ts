@@ -2,11 +2,9 @@ import 'dotenv/config';
 import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
 import fastifySocketIO from 'fastify-socket.io';
-import { initMarketGateway } from './domains/market/market.gateway';
-import { historyController } from './domains/history/history.controller';
-// In production, ingestion worker should ideally run in a completely separate process.
-// For development convenience, we start it inside the same app.
-import { startIngestionWorker } from './domains/market/market.worker';
+import { initMarketGateway } from './domains/market/market.gateway.js';
+import { historyController } from './domains/history/history.controller.js';
+import { initDB } from './infrastructure/db.js';
 
 const fastify = Fastify({ logger: true });
 
@@ -16,7 +14,7 @@ fastify.register(fastifyCors, {
 });
 
 // Register Socket.io plugin
-fastify.register(fastifySocketIO, {
+fastify.register(fastifySocketIO as any, {
   cors: {
     origin: '*',
   }
@@ -34,7 +32,7 @@ fastify.ready(async err => {
   if (err) throw err;
 
   // Initialize WebSocket gateways
-  await initMarketGateway(fastify.io);
+  await initMarketGateway((fastify as any).io);
   fastify.log.info('Market WebSocket Gateway initialized.');
 
   // Start background worker for generating dummy tick data -> Kafka
@@ -43,6 +41,7 @@ fastify.ready(async err => {
 
 const start = async () => {
   try {
+    await initDB();
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
     await fastify.listen({ port, host: '0.0.0.0' });
     fastify.log.info(`Server is now listening on http://localhost:${port}`);
