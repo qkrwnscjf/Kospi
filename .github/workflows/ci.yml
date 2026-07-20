@@ -32,4 +32,4 @@ jobs:
         npm run build
 
     - name: Docker Compose Build Test
-      run: docker-compose build
+      run: docker compose build
