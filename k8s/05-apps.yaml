@@ -92,7 +92,7 @@ spec:
       containers:
       - name: frontend
         # TODO: <YOUR_DOCKER_ID> 부분을 실제 Docker Hub 아이디로 변경하세요.
-        image: pjc0203009/kospi-frontend:v1
+        image: pjc020309/kospi-frontend:v1
         ports:
         - containerPort: 80
 ---
