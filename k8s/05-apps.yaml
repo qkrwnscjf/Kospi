@@ -74,6 +74,16 @@ spec:
           value: "production"
         - name: KAFKA_BROKERS
           value: "kafka:9092"
+        - name: DB_USER
+          value: "postgres"
+        - name: DB_PASSWORD
+          value: "password"
+        - name: DB_HOST
+          value: "timescaledb"
+        - name: DB_NAME
+          value: "kospi"
+        - name: DB_PORT
+          value: "5432"
 ---
 apiVersion: apps/v1
 kind: Deployment
