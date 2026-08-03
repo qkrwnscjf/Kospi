@@ -14,8 +14,8 @@ spec:
     spec:
       containers:
       - name: backend
-        # TODO: <YOUR_DOCKER_ID> 부분을 실제 Docker Hub 아이디로 변경하세요.
-        image: pjc020309/kospi-backend:v1
+        # TODO: [사용자 도커 ID] 부분을 실제 Docker Hub 아이디로 변경하세요.
+        image: [사용자 도커 ID]/kospi-backend:v1
         env:
         - name: NODE_ENV
           value: "production"
@@ -66,8 +66,8 @@ spec:
     spec:
       containers:
       - name: worker
-        # TODO: <YOUR_DOCKER_ID> 부분을 실제 Docker Hub 아이디로 변경하세요.
-        image: pjc020309/kospi-backend:v1
+        # TODO: [사용자 도커 ID] 부분을 실제 Docker Hub 아이디로 변경하세요.
+        image: [사용자 도커 ID]/kospi-backend:v1
         command: ["node", "dist/infrastructure/ingestion/worker.js"]
         env:
         - name: NODE_ENV
@@ -101,8 +101,8 @@ spec:
     spec:
       containers:
       - name: frontend
-        # TODO: <YOUR_DOCKER_ID> 부분을 실제 Docker Hub 아이디로 변경하세요.
-        image: pjc020309/kospi-frontend:v1
+        # TODO: [사용자 도커 ID] 부분을 실제 Docker Hub 아이디로 변경하세요.
+        image: [사용자 도커 ID]/kospi-frontend:v1
         ports:
         - containerPort: 80
 ---
