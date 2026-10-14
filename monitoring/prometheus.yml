@@ -5,3 +5,12 @@ scrape_configs:
   - job_name: 'kafka-exporter'
     static_configs:
       - targets: ['kafka-exporter:9308']
+
+  # 앱 메트릭 (docs/Task_ORDER.md T-01). 9464는 Docker 내부 네트워크 전용 포트이며 호스트에 공개하지 않는다.
+  - job_name: 'worker'
+    static_configs:
+      - targets: ['worker:9464']
+
+  - job_name: 'backend'
+    static_configs:
+      - targets: ['backend:9464']
