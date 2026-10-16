@@ -3,7 +3,7 @@ import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
 import fastifySocketIO from 'fastify-socket.io';
 import { initMarketGateway } from './domains/market/market.gateway.js';
-import { historyController } from './domains/history/history.controller.js';
+import { historyController, startHistorySelfCheck } from './domains/history/history.controller.js';
 import { initDB } from './infrastructure/db.js';
 import { metricsConfig, startMetricsLog, startMetricsServer } from './infrastructure/metrics.js';
 
@@ -53,6 +53,7 @@ const start = async () => {
     startMetricsServer(metricsConfig.port);
     startMetricsLog('backend', metricsConfig.logIntervalMs);
     fastify.log.info(`Metrics server listening on :${metricsConfig.port} (internal only)`);
+    startHistorySelfCheck();
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
