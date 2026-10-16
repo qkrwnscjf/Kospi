@@ -97,13 +97,13 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Worker 소요 시간 p95 (수집 1회 · DB 적재 · Kafka 전송)",
+      "title": "소요 시간 p95 (worker 수집 1회 · DB Sink 배치 INSERT · Kafka 전송)",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         { "refId": "A", "legendFormat": "수집 1회", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_worker_cycle_duration_seconds_bucket[2m])))" },
-        { "refId": "B", "legendFormat": "DB 적재", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_worker_db_insert_duration_seconds_bucket[2m])))" },
+        { "refId": "B", "legendFormat": "DB 적재 (DB Sink)", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_sink_insert_duration_seconds_bucket{result=\"commit\"}[2m])))" },
         { "refId": "C", "legendFormat": "Kafka 전송", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_worker_kafka_send_duration_seconds_bucket[2m])))" }
       ]
     },

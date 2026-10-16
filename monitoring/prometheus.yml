@@ -14,3 +14,8 @@ scrape_configs:
   - job_name: 'backend'
     static_configs:
       - targets: ['backend:9464']
+
+  # DB 적재 컨슈머 (docs/Task_ORDER.md T-12). 내부 전용 포트.
+  - job_name: 'db-sink'
+    static_configs:
+      - targets: ['db-sink:9464']

@@ -2,7 +2,7 @@ import { fetchYahooData } from './yahoo-api.js';
 import { fetchNaverData } from './naver-api.js';
 import type { NormalizedMarketData } from './normalizer.js';
 import { MARKETS } from './market-hours.js';
-import { producer } from '../kafka.js';
+import { producer, TOPICS, ensureTopics } from '../kafka.js';
 import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsServer } from '../metrics.js';
 
 const readIntEnv = (name: string, fallback: number) => Number.parseInt(process.env[name] ?? '', 10) || fallback;
@@ -19,15 +19,16 @@ const IDLE_POLLING_INTERVAL_MS = readIntEnv('IDLE_POLLING_INTERVAL_MS', 60000);
 const MARKET_CLOCK_OFFSET_MS = Number.parseInt(process.env.MARKET_CLOCK_OFFSET_MS ?? '', 10) || 0;
 // Naver 수집은 보류 중(R-03)이라 기본값은 끔. "true"일 때만 수집한다 (docs/Task_ORDER.md T-10, D-15)
 const NAVER_ENABLED = process.env.NAVER_ENABLED === 'true';
+// 검증용: true이면 시작할 때 잘못된 메시지 2건을 한 번 보낸다(기본 끔). 컨슈머 방어(T-13)를 확인하기 위함
+const KAFKA_TEST_INJECT_INVALID = process.env.KAFKA_TEST_INJECT_INVALID === 'true';
 
 // 측정 지표 (docs/Task_ORDER.md T-01)
 const fetchDuration = new Latency('kospi_worker_fetch_duration_seconds', 'External API fetch duration by source');
 const fetchTotal = new Counter('kospi_worker_fetch_total', 'External API fetch attempts by source and result (success / empty / timeout / error)');
 const itemsTotal = new Counter('kospi_worker_items_total', 'Items fetched by source');
 const collectLag = new Latency('kospi_worker_collect_lag_seconds', 'Source timestamp to worker collection time by symbol');
-const dbInsertDuration = new Latency('kospi_worker_db_insert_duration_seconds', 'TimescaleDB insert transaction duration');
 const kafkaSendDuration = new Latency('kospi_worker_kafka_send_duration_seconds', 'Kafka producer send duration');
-const cycleDuration = new Latency('kospi_worker_cycle_duration_seconds', 'One polling cycle duration (fetch + DB + Kafka)');
+const cycleDuration = new Latency('kospi_worker_cycle_duration_seconds', 'One polling cycle duration (fetch + Kafka)');
 
 // 소스 갱신 주기 측정 (docs/Task_ORDER.md T-03, BENCHMARK M-04)
 const sourceUpdateInterval = new Latency('kospi_worker_source_update_interval_seconds', 'Interval between consecutive new source timestamps by symbol');
@@ -141,41 +142,10 @@ async function runCycle(): Promise<FetchResult> {
       console.log(`Fetched ${allData.length} items, no new ticks.`);
     }
     if (freshData.length > 0) {
-      console.log(`Successfully fetched ${allData.length} items (${freshData.length} new). Sending to Kafka and DB...`);
+      console.log(`Successfully fetched ${allData.length} items (${freshData.length} new). Sending to Kafka...`);
 
-      // --- 1. DB 적재 (TimescaleDB) ---
-      const { dbPool } = await import('../db.js');
-      const dbStartedAt = Date.now();
-      const client = await dbPool.connect();
-      try {
-        await client.query('BEGIN');
-        for (const data of freshData) {
-          // timestamp는 검증을 통과한 값이고(T-05), 거래량 0은 정상값이라 null로 바꾸지 않는다.
-          await client.query(
-            `INSERT INTO market_ticks (time, symbol, category, price, change_rate, change_price, volume)
-             VALUES (to_timestamp($1 / 1000.0), $2, $3, $4, $5, $6, $7)`,
-            [
-              data.timestamp,
-              data.ticker,
-              data.category,
-              data.price,
-              data.changeRate,
-              data.changePrice,
-              data.volume ?? null
-            ]
-          );
-        }
-        await client.query('COMMIT');
-        dbInsertDuration.observe({ result: 'commit' }, Date.now() - dbStartedAt);
-      } catch (dbErr) {
-        await client.query('ROLLBACK');
-        dbInsertDuration.observe({ result: 'rollback' }, Date.now() - dbStartedAt);
-        console.error('Failed to insert into TimescaleDB:', dbErr);
-      } finally {
-        client.release();
-      }
-
-      // --- 2. Kafka 전송 ---
+      // Kafka 전송. DB 저장은 DB Sink가 Kafka에서 읽어서 한다 (docs/Task_ORDER.md T-12, D-18).
+      // 이전에는 여기서 DB 저장이 끝나야 전송이 시작되어, DB 지연이 곧 실시간 지연이었다.
       const producedAt = Date.now();
       const messages = freshData.map(data => {
         // Map ticker to symbol for internal TickData usage
@@ -197,7 +167,7 @@ async function runCycle(): Promise<FetchResult> {
         };
       });
 
-      await producer.send({ topic: 'market-ticks', messages });
+      await producer.send({ topic: TOPICS.ticks, messages });
       kafkaSendDuration.observe({}, Date.now() - producedAt);
 
       // 전송에 성공한 뒤에만 "마지막 전송 시각"을 갱신한다. 실패하면 다음 주기에 다시 보낼 수 있도록.
@@ -210,7 +180,7 @@ async function runCycle(): Promise<FetchResult> {
       console.log('Sample Data Sent:', freshData.slice(0, 3).map(d => d.ticker));
     }
   } catch (error) {
-    // DB·Kafka 실패는 백오프하지 않는다 (외부 API 보호가 백오프의 목적)
+    // Kafka 전송 실패는 백오프하지 않는다 (외부 API 보호가 백오프의 목적)
     console.error('Worker loop error:', error);
   }
 
@@ -289,6 +259,19 @@ async function runIngestionWorker() {
 
   await producer.connect();
   console.log('Connected to Kafka producer.');
+  const partitions = await ensureTopics();
+  console.log(`Kafka topic ${TOPICS.ticks} ready (${partitions} partitions).`);
+
+  if (KAFKA_TEST_INJECT_INVALID) {
+    await producer.send({
+      topic: TOPICS.ticks,
+      messages: [
+        { key: 'TEST', value: 'not-json' },
+        { key: 'TEST', value: JSON.stringify({ symbol: 'KOSPI', category: 'domestic', price: -1, changeRate: 0, timestamp: Date.now() }) },
+      ],
+    });
+    console.warn('KAFKA_TEST_INJECT_INVALID=true: sent 2 invalid test messages (verification only).');
+  }
 
   // Kafka 연결 성공 후에 시작한다. 연결 실패 시 메트릭 서버 때문에 프로세스가 살아남지 않도록.
   startMetricsServer(metricsConfig.port);

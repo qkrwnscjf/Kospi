@@ -26,6 +26,8 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # 토픽은 코드(ensureTopics)가 명시적으로 만든다. 자동 생성을 끄면 파티션 1개짜리 토픽이 실수로 생기지 않는다 (T-11, D-17)
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     # 브로커가 요청에 응답하면 healthy (docs/Task_ORDER.md T-29). 컨테이너 안에서 자기 자신만 확인한다.
     healthcheck:
       test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
@@ -106,6 +108,22 @@ services:
     container_name: kospi-worker
     restart: on-failure
     command: ["node", "dist/infrastructure/ingestion/worker.js"]
+    # worker는 Kafka에만 전송한다. DB 저장은 db-sink가 맡으므로 DB 접속 정보가 필요 없다 (T-12, D-18)
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - POLLING_INTERVAL_MS=5000
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # DB 적재 컨슈머 (T-12, D-18): market-ticks를 읽어 TimescaleDB에 배치 INSERT
+  db-sink:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kospi-db-sink
+    restart: on-failure
+    command: ["node", "dist/infrastructure/sink/db-sink.js"]
     environment:
       - DB_HOST=timescaledb
       - DB_PORT=5432
@@ -113,7 +131,7 @@ services:
       - DB_PASSWORD=password
       - DB_NAME=kospi
       - KAFKA_BROKERS=kafka:29092
-      - POLLING_INTERVAL_MS=5000
+    # backend가 healthy해야 DB 스키마(initDB)가 만들어진 상태다
     depends_on:
       kafka:
         condition: service_healthy

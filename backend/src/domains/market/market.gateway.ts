@@ -1,9 +1,9 @@
 import { Server, Socket } from 'socket.io';
 import type { EachMessagePayload } from 'kafkajs';
-import { kafka } from '../../infrastructure/kafka.js';
+import { kafka, TOPICS, ensureTopics, sendToDlq } from '../../infrastructure/kafka.js';
 import { Counter, Gauge, Latency } from '../../infrastructure/metrics.js';
 import { marketService } from './market.service.js';
-import type { TickData } from '../../shared/types.js';
+import { parseTick } from '../../shared/tick-validation.js';
 
 // 측정 지표 (docs/Task_ORDER.md T-01)
 const messagesTotal = new Counter('kospi_gateway_messages_total', 'Kafka messages processed by the gateway');
@@ -19,23 +19,43 @@ const kafkaConnected = new Gauge('kospi_gateway_kafka_connected', 'Whether the g
 const kafkaConnectAttempts = new Counter('kospi_gateway_kafka_connect_attempts_total', 'Gateway Kafka connect attempts by result (success / failure)');
 kafkaConnected.set({}, 0);
 
+// 잘못된 메시지 방어 (docs/Task_ORDER.md T-13, SEC-002)
+const invalidTotal = new Counter('kospi_gateway_invalid_messages_total', 'Messages sent to the DLQ by the gateway, by reason');
+const redisErrorsTotal = new Counter('kospi_gateway_redis_errors_total', 'Redis errors while caching the latest tick');
+
 const RECONNECT_INITIAL_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
+const CONSUMER_NAME = 'gateway';
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-const handleMessage = (io: Server) => async ({ message }: EachMessagePayload) => {
-  if (!message.value) return;
+const dlqProducer = kafka.producer();
+
+// 이 핸들러는 예외를 던지지 않는다. 던지면 kafkajs가 같은 메시지를 계속 다시 시도해서 실시간 경로 전체가 멈춘다 (SEC-002).
+const handleMessage = (io: Server) => async ({ topic, partition, message }: EachMessagePayload) => {
   const consumedAt = Date.now();
-  const tick: TickData = JSON.parse(message.value.toString());
+  const parsed = parseTick(message.value);
+  if (!parsed.ok) {
+    invalidTotal.inc({ reason: parsed.reason });
+    console.warn(`Gateway skipped invalid message at ${topic}[${partition}]@${message.offset}: ${parsed.reason}`);
+    await sendToDlq(dlqProducer, { consumer: CONSUMER_NAME, topic, partition, message, reason: parsed.reason });
+    return;
+  }
+
+  const tick = parsed.tick;
   if (tick.producedAt !== undefined) {
     kafkaLatency.observe({}, consumedAt - tick.producedAt);
   }
 
-  // Cache latest tick in Redis
+  // Cache latest tick in Redis. 실패해도 브라우저 전송은 계속한다.
   const redisStartedAt = Date.now();
-  await marketService.saveLatestTick(tick);
-  redisSetDuration.observe({}, Date.now() - redisStartedAt);
+  try {
+    await marketService.saveLatestTick(tick);
+    redisSetDuration.observe({}, Date.now() - redisStartedAt);
+  } catch (error) {
+    redisErrorsTotal.inc();
+    console.error(`Gateway failed to cache latest tick for ${tick.symbol}: ${errorMessage(error)}`);
+  }
 
   // Broadcast to specific symbol room
   const emittedAt = Date.now();
@@ -53,8 +73,10 @@ const handleMessage = (io: Server) => async ({ message }: EachMessagePayload) =>
 async function startConsumer(io: Server) {
   const consumer = kafka.consumer({ groupId: 'market-group' });
   try {
+    await dlqProducer.connect();
+    await ensureTopics();
     await consumer.connect();
-    await consumer.subscribe({ topic: 'market-ticks', fromBeginning: false });
+    await consumer.subscribe({ topic: TOPICS.ticks, fromBeginning: false });
 
     consumer.on(consumer.events.GROUP_JOIN, () => kafkaConnected.set({}, 1));
     consumer.on(consumer.events.CRASH, event => {
