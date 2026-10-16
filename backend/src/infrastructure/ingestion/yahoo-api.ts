@@ -44,51 +44,80 @@ const KEY_BY_YAHOO_SYMBOL = new Map<string, YahooSymbolKey>(
   (Object.keys(YAHOO_SYMBOLS) as YahooSymbolKey[]).map(key => [YAHOO_SYMBOLS[key], key])
 );
 
-// 측정 지표 (docs/Task_ORDER.md T-30). 라벨에는 내부 심볼만 넣는다.
+// 측정 지표 (docs/Task_ORDER.md T-30, T-05). 라벨에는 내부 심볼과 고정된 사유만 넣는다.
 const symbolAliasTotal = new Counter('kospi_worker_symbol_alias_total', 'Yahoo responses whose symbol was an alias, by internal symbol');
 const unmappedSymbolTotal = new Counter('kospi_worker_unmapped_symbol_total', 'Yahoo quotes dropped because the symbol could not be mapped');
+const invalidQuoteTotal = new Counter('kospi_worker_invalid_quote_total', 'Yahoo quotes dropped by validation, by symbol and reason');
 
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+
+// 값 검증 (docs/Task_ORDER.md T-05, D-14)
+// 이전에는 값이 없으면 0이나 수집 시각으로 대체해서, "값 없음"이 정상값처럼 저장되었다.
+// 이제는 버리고 사유를 센다. 등락률·등락폭의 0은 실제로 나올 수 있는 정상값이라 허용한다.
+type ValidatedQuote = { price: number; time: Date; changeRate: number; changePrice: number };
+
+function validateQuote(
+  price: unknown,
+  time: unknown,
+  changeRate: unknown,
+  changePrice: unknown
+): ValidatedQuote | { reason: string } {
+  if (!isFiniteNumber(price) || price <= 0) return { reason: 'price' };
+  if (!(time instanceof Date) || Number.isNaN(time.getTime())) return { reason: 'timestamp' };
+  if (!isFiniteNumber(changeRate)) return { reason: 'change_rate' };
+  if (!isFiniteNumber(changePrice)) return { reason: 'change_price' };
+  return { price, time, changeRate, changePrice };
+}
+
+// 요청 실패는 삼키지 않고 던진다. worker가 result="error"로 집계하고 백오프한다 (docs/Task_ORDER.md T-05).
 export async function fetchYahooData(): Promise<NormalizedMarketData[]> {
-  try {
-    const symbols = Object.values(YAHOO_SYMBOLS);
+  const symbols = Object.values(YAHOO_SYMBOLS);
 
-    // yahoo-finance2 supports fetching multiple quotes at once
-    const quotes = await yahooFinance.quote(symbols);
+  // yahoo-finance2 supports fetching multiple quotes at once
+  const quotes = await yahooFinance.quote(symbols);
 
-    const results: NormalizedMarketData[] = [];
-    const seen = new Set<YahooSymbolKey>();
+  const results: NormalizedMarketData[] = [];
+  const seen = new Set<YahooSymbolKey>();
 
-    for (const quote of quotes) {
-      const canonicalSymbol = YAHOO_SYMBOL_ALIASES[quote.symbol] ?? quote.symbol;
-      const key = KEY_BY_YAHOO_SYMBOL.get(canonicalSymbol);
+  for (const quote of quotes) {
+    const canonicalSymbol = YAHOO_SYMBOL_ALIASES[quote.symbol] ?? quote.symbol;
+    const key = KEY_BY_YAHOO_SYMBOL.get(canonicalSymbol);
 
-      // 매핑할 수 없는 심볼은 그대로 쓰지 않고 버린다. 잘못된 심볼이 Kafka와 DB에 들어가지 않게 하기 위함.
-      if (!key) {
-        unmappedSymbolTotal.inc();
-        console.warn(`Unmapped Yahoo symbol skipped: ${quote.symbol}`);
-        continue;
-      }
-      if (canonicalSymbol !== quote.symbol) {
-        symbolAliasTotal.inc({ symbol: key });
-      }
-      // 같은 응답에 표준 심볼과 별칭이 함께 오면 먼저 온 하나만 쓴다.
-      if (seen.has(key)) continue;
-      seen.add(key);
+    // 매핑할 수 없는 심볼은 그대로 쓰지 않고 버린다. 잘못된 심볼이 Kafka와 DB에 들어가지 않게 하기 위함.
+    if (!key) {
+      unmappedSymbolTotal.inc();
+      console.warn(`Unmapped Yahoo symbol skipped: ${quote.symbol}`);
+      continue;
+    }
+    if (canonicalSymbol !== quote.symbol) {
+      symbolAliasTotal.inc({ symbol: key });
+    }
+    // 같은 응답에 표준 심볼과 별칭이 함께 오면 먼저 온 하나만 쓴다.
+    if (seen.has(key)) continue;
+    seen.add(key);
 
-      results.push({
-        ticker: key,
-        category: CATEGORY_BY_KEY[key],
-        price: quote.regularMarketPrice || 0,
-        changeRate: quote.regularMarketChangePercent || 0,
-        changePrice: quote.regularMarketChange || 0,
-        timestamp: quote.regularMarketTime?.getTime() || Date.now(),
-        ...(quote.regularMarketVolume !== undefined ? { volume: quote.regularMarketVolume } : {}),
-      });
+    const validated = validateQuote(
+      quote.regularMarketPrice,
+      quote.regularMarketTime,
+      quote.regularMarketChangePercent,
+      quote.regularMarketChange
+    );
+    if ('reason' in validated) {
+      invalidQuoteTotal.inc({ symbol: key, reason: validated.reason });
+      console.warn(`Invalid Yahoo quote skipped: ${key} (${validated.reason})`);
+      continue;
     }
 
-    return results;
-  } catch (error) {
-    console.error('Error fetching Yahoo Finance data:', error);
-    return [];
+    results.push({
+      ticker: key,
+      category: CATEGORY_BY_KEY[key],
+      price: validated.price,
+      changeRate: validated.changeRate,
+      changePrice: validated.changePrice,
+      timestamp: validated.time.getTime(),
+      ...(isFiniteNumber(quote.regularMarketVolume) ? { volume: quote.regularMarketVolume } : {}),
+    });
   }
+
+  return results;
 }

@@ -1,0 +1,144 @@
+{
+  "uid": "kospi-pipeline",
+  "title": "KOSPI Pipeline",
+  "description": "실시간 파이프라인 지연·수집·Kafka 상태 (docs/BENCHMARK.md 지표 M-02 ~ M-12)",
+  "tags": ["kospi", "pipeline"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "수집 → WebSocket 전송 지연 (M-03)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.5, sum by (le) (rate(kospi_gateway_pipeline_latency_seconds_bucket[1m])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_gateway_pipeline_latency_seconds_bucket[1m])))" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Kafka 구간 지연 (전송 → Gateway 수신)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.5, sum by (le) (rate(kospi_gateway_kafka_latency_seconds_bucket[1m])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_gateway_kafka_latency_seconds_bucket[1m])))" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "소스 대비 지연 (M-02, 심볼별 p50)",
+      "description": "DXY, US10Y, WTI, COPPER는 소스 자체가 10~15분 지연 시세입니다 (BENCHMARK B-02).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{symbol}}", "expr": "histogram_quantile(0.5, sum by (le, symbol) (rate(kospi_worker_collect_lag_seconds_bucket[2m])))" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Yahoo API 응답 시간 (M-05)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.5, sum by (le) (rate(kospi_worker_fetch_duration_seconds_bucket{source=\"yahoo\"}[2m])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_worker_fetch_duration_seconds_bucket{source=\"yahoo\"}[2m])))" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "새 값 비율 (M-04, 심볼별)",
+      "description": "polling할 때 소스 시각이 바뀐 비율. 낮으면 소스 갱신 주기보다 자주 묻고 있다는 뜻입니다 (BENCHMARK B-02).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{symbol}}", "expr": "sum by (symbol) (rate(kospi_worker_source_poll_total{result=\"new_timestamp\"}[5m])) / sum by (symbol) (rate(kospi_worker_source_poll_total[5m]))" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "수집 결과 (초당, M-06)",
+      "description": "result=empty는 0건 반환(Naver는 P-01로 현재 항상 empty).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{source}} / {{result}}", "expr": "sum by (source, result) (rate(kospi_worker_fetch_total[5m]))" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Kafka 컨슈머 지연 · 토픽 유입 속도 (M-07)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "lag (market-group)", "expr": "sum(kafka_consumergroup_lag{consumergroup=\"market-group\"})" },
+        { "refId": "B", "legendFormat": "유입 (msg/s)", "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"market-ticks\"}[1m]))" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Worker 소요 시간 p95 (수집 1회 · DB 적재 · Kafka 전송)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "수집 1회", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_worker_cycle_duration_seconds_bucket[2m])))" },
+        { "refId": "B", "legendFormat": "DB 적재", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_worker_db_insert_duration_seconds_bucket[2m])))" },
+        { "refId": "C", "legendFormat": "Kafka 전송", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_worker_kafka_send_duration_seconds_bucket[2m])))" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "WebSocket 연결 수 (M-12)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 32, "w": 8, "h": 5 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "connections", "expr": "sum(kospi_ws_connections)" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "심볼 별칭 변환 (최근 1시간, P-23)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 8, "y": 32, "w": 8, "h": 5 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "alias", "expr": "sum(increase(kospi_worker_symbol_alias_total[1h])) or vector(0)" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "매핑 실패로 버린 항목 (최근 1시간)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 16, "y": 32, "w": 8, "h": 5 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "unmapped", "expr": "sum(increase(kospi_worker_unmapped_symbol_total[1h])) or vector(0)" }
+      ]
+    }
+  ]
+}

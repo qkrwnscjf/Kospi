@@ -1,4 +1,5 @@
-FROM node:20-alpine
+# yahoo-finance2가 Node 22 이상을 요구한다 (docs/Task_ORDER.md T-09, P-18)
+FROM node:22-alpine
 
 WORKDIR /app
 

@@ -33,8 +33,10 @@ fastify.ready(async err => {
   if (err) throw err;
 
   // Initialize WebSocket gateways
-  await initMarketGateway((fastify as any).io);
-  fastify.log.info('Market WebSocket Gateway initialized.');
+  // 핸들러만 바로 등록하고, Kafka 연결은 백그라운드에서 성공할 때까지 재시도한다 (docs/Task_ORDER.md T-14).
+  // 연결 성공 여부는 'Gateway Kafka consumer connected.' 로그와 kospi_gateway_kafka_connected 메트릭으로 확인한다.
+  initMarketGateway((fastify as any).io);
+  fastify.log.info('Market WebSocket handlers registered (Kafka consumer connects in background).');
 
   // Start background worker for generating dummy tick data -> Kafka
   // startIngestionWorker().catch(fastify.log.error);

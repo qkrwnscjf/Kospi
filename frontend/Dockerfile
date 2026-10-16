@@ -1,5 +1,6 @@
 # Stage 1: Build React/Vite app
-FROM node:20-alpine as builder
+# CI와 같은 Node 버전으로 빌드한다 (docs/Task_ORDER.md T-09)
+FROM node:22-alpine as builder
 
 WORKDIR /app
 

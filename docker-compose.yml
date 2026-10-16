@@ -20,12 +20,19 @@ services:
     ports:
       - "9092:9092"
     environment:
-      KAFKA_BROKER_ID: 1
+      KAFKA_BROKER_ID: 1 
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    # 브로커가 요청에 응답하면 healthy (docs/Task_ORDER.md T-29). 컨테이너 안에서 자기 자신만 확인한다.
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
 
   # Redis (Caching Layer)
   redis:
@@ -33,6 +40,11 @@ services:
     container_name: kospi-redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # TimescaleDB (Time-series Database based on PostgreSQL)
   timescaledb:
@@ -46,6 +58,12 @@ services:
       - "5432:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
+    # 접속 가능 여부만 확인한다 (비밀번호를 쓰지 않음)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kospi"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   # Backend API Server
   backend:
@@ -64,10 +82,21 @@ services:
       - DB_PASSWORD=password
       - DB_NAME=kospi
       - KAFKA_BROKERS=kafka:29092
+    # /api/health는 DB 스키마 생성(initDB) 후에 응답하므로, worker는 이 healthcheck를 기다린다 (T-29)
+    # localhost는 Alpine wget에서 IPv6(::1)로 해석되는데 서버는 IPv4(0.0.0.0)에서만 대기하므로 127.0.0.1을 쓴다.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3001/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     depends_on:
-      - kafka
-      - redis
-      - timescaledb
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
 
   # Data Ingestion Worker
   worker:
@@ -84,9 +113,14 @@ services:
       - DB_PASSWORD=password
       - DB_NAME=kospi
       - KAFKA_BROKERS=kafka:29092
+      - POLLING_INTERVAL_MS=5000
     depends_on:
-      - kafka
-      - timescaledb
+      kafka:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
 
   # Frontend UI (Nginx)
   frontend:
@@ -105,10 +139,12 @@ services:
     image: danielqsj/kafka-exporter:latest
     container_name: kospi-kafka-exporter
     command: ["--kafka.server=kafka:29092"]
+    restart: on-failure
     ports:
       - "9308:9308"
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
 
   prometheus:
     image: prom/prometheus:latest
@@ -126,6 +162,10 @@ services:
     container_name: kospi-grafana
     volumes:
       - grafana_data:/var/lib/grafana
+      # 데이터소스·대시보드 자동 설정 (docs/Task_ORDER.md T-02). 모두 읽기 전용.
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
     ports:
       - "3000:3000"
     depends_on:

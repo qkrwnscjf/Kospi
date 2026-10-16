@@ -1,15 +1,28 @@
 import { fetchYahooData } from './yahoo-api.js';
 import { fetchNaverData } from './naver-api.js';
 import type { NormalizedMarketData } from './normalizer.js';
+import { MARKETS } from './market-hours.js';
 import { producer } from '../kafka.js';
-import { Counter, Latency, metricsConfig, startMetricsLog, startMetricsServer } from '../metrics.js';
+import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsServer } from '../metrics.js';
+
+const readIntEnv = (name: string, fallback: number) => Number.parseInt(process.env[name] ?? '', 10) || fallback;
 
 // 기본 10초. B-02 측정을 위해 환경변수로 바꿀 수 있게 했다 (docs/Task_ORDER.md T-30)
-const POLLING_INTERVAL_MS = Number.parseInt(process.env.POLLING_INTERVAL_MS ?? '', 10) || 10000;
+const POLLING_INTERVAL_MS = readIntEnv('POLLING_INTERVAL_MS', 10000);
+// 소스별 수집 시간 제한. 넘기면 실패로 보고 그 주기를 넘긴다 (docs/Task_ORDER.md T-04)
+const FETCH_TIMEOUT_MS = readIntEnv('FETCH_TIMEOUT_MS', 3000);
+// 연속 실패 시 대기 시간 상한 (docs/Task_ORDER.md T-04)
+const MAX_BACKOFF_MS = readIntEnv('MAX_BACKOFF_MS', 60000);
+// 모든 시장이 닫혀 있을 때의 polling 주기 (docs/Task_ORDER.md T-07, D-16)
+const IDLE_POLLING_INTERVAL_MS = readIntEnv('IDLE_POLLING_INTERVAL_MS', 60000);
+// 검증용: 장 시간을 판단할 때만 시계를 옮긴다(기본 0). 실제 수집 시각과 데이터에는 영향이 없다 (T-07)
+const MARKET_CLOCK_OFFSET_MS = Number.parseInt(process.env.MARKET_CLOCK_OFFSET_MS ?? '', 10) || 0;
+// Naver 수집은 보류 중(R-03)이라 기본값은 끔. "true"일 때만 수집한다 (docs/Task_ORDER.md T-10, D-15)
+const NAVER_ENABLED = process.env.NAVER_ENABLED === 'true';
 
 // 측정 지표 (docs/Task_ORDER.md T-01)
 const fetchDuration = new Latency('kospi_worker_fetch_duration_seconds', 'External API fetch duration by source');
-const fetchTotal = new Counter('kospi_worker_fetch_total', 'External API fetch attempts by source and result (success / empty)');
+const fetchTotal = new Counter('kospi_worker_fetch_total', 'External API fetch attempts by source and result (success / empty / timeout / error)');
 const itemsTotal = new Counter('kospi_worker_items_total', 'Items fetched by source');
 const collectLag = new Latency('kospi_worker_collect_lag_seconds', 'Source timestamp to worker collection time by symbol');
 const dbInsertDuration = new Latency('kospi_worker_db_insert_duration_seconds', 'TimescaleDB insert transaction duration');
@@ -21,7 +34,29 @@ const sourceUpdateInterval = new Latency('kospi_worker_source_update_interval_se
 const sourcePollTotal = new Counter('kospi_worker_source_poll_total', 'Polls by symbol and result (new_timestamp / same_timestamp)');
 const lastSourceTimestamp = new Map<string, number>();
 
+// 수집 루프 상태 (docs/Task_ORDER.md T-04)
+const cycleStartInterval = new Latency('kospi_worker_cycle_start_interval_seconds', 'Interval between consecutive polling cycle starts');
+const backoffTotal = new Counter('kospi_worker_backoff_total', 'Polling cycles scheduled with backoff after a failed Yahoo fetch');
+const pollDelay = new Gauge('kospi_worker_poll_delay_seconds', 'Currently applied delay between polling cycles');
+const marketOpen = new Gauge('kospi_worker_market_open', 'Whether each market is in regular trading hours (1) or not (0)');
+
+// 변경 감지 (docs/Task_ORDER.md T-06, D-13). 심볼별로 마지막으로 Kafka 전송에 성공한 소스 시각.
+const tickTotal = new Counter('kospi_worker_tick_total', 'Collected ticks by symbol and result (sent / skipped_unchanged)');
+const lastSentTimestamp = new Map<string, number>();
+
 type CollectedMarketData = NormalizedMarketData & { collectedAt: number };
+type FetchResult = 'success' | 'empty' | 'timeout' | 'error';
+
+class FetchTimeoutError extends Error {}
+
+// 정해진 시간 안에 끝나지 않으면 실패로 처리한다. 원래 요청은 중단되지 않고 결과만 버려진다.
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new FetchTimeoutError(`timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // Yahoo는 timestamp에 소스 기준 시각(regularMarketTime)을 넣으므로, 이 값이 바뀌는 간격이 곧 소스 갱신 주기다.
 // Naver는 수집 시각(Date.now())을 넣기 때문에 측정 대상에서 제외한다.
@@ -38,28 +73,219 @@ function trackSourceUpdate(item: NormalizedMarketData) {
   }
 }
 
-// 소스별 응답 시간과 수집 시각을 기록한다. 어댑터는 에러를 삼키고 []를 반환하므로 결과는 success / empty로만 구분된다.
-async function collect(source: string, fetcher: () => Promise<NormalizedMarketData[]>): Promise<CollectedMarketData[]> {
+// 소스별 응답 시간과 수집 시각을 기록한다. 결과는 success / empty(0건) / timeout / error로 나눈다 (T-04, T-05).
+// Naver 어댑터는 아직 에러를 삼키고 []를 반환하므로, Naver의 에러는 empty로 집계된다.
+async function collect(
+  source: string,
+  fetcher: () => Promise<NormalizedMarketData[]>
+): Promise<{ result: FetchResult; items: CollectedMarketData[] }> {
   const startedAt = Date.now();
-  const items = await fetcher();
+  let items: NormalizedMarketData[] = [];
+  let result: FetchResult;
+
+  try {
+    items = await withTimeout(fetcher(), FETCH_TIMEOUT_MS);
+    result = items.length > 0 ? 'success' : 'empty';
+  } catch (error) {
+    if (error instanceof FetchTimeoutError) {
+      result = 'timeout';
+      console.warn(`[${source}] fetch ${error.message}`);
+    } else {
+      result = 'error';
+      console.error(`[${source}] fetch failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const collectedAt = Date.now();
 
   fetchDuration.observe({ source }, collectedAt - startedAt);
-  fetchTotal.inc({ source, result: items.length > 0 ? 'success' : 'empty' });
+  fetchTotal.inc({ source, result });
   itemsTotal.inc({ source }, items.length);
 
-  return items.map(item => {
-    collectLag.observe({ symbol: item.ticker }, collectedAt - item.timestamp);
-    if (source === 'yahoo') {
-      trackSourceUpdate(item);
+  return {
+    result,
+    items: items.map(item => {
+      collectLag.observe({ symbol: item.ticker }, collectedAt - item.timestamp);
+      if (source === 'yahoo') {
+        trackSourceUpdate(item);
+      }
+      return { ...item, collectedAt };
+    }),
+  };
+}
+
+// 수집 1회: 외부 API 조회 → DB 적재 → Kafka 전송. Yahoo 수집 결과를 돌려준다 (백오프 판단용).
+async function runCycle(): Promise<FetchResult> {
+  console.log(`\n[${new Date().toISOString()}] Fetching market data...`);
+
+  // 두 요청을 먼저 모두 시작한 뒤 기다린다 (동시 수집). Naver는 켜져 있을 때만 요청한다 (T-10).
+  const yahooPromise = collect('yahoo', fetchYahooData);
+  const naverPromise = NAVER_ENABLED ? collect('naver', fetchNaverData) : undefined;
+  const yahoo = await yahooPromise;
+  const naver = naverPromise ? await naverPromise : undefined;
+
+  const allData = [...yahoo.items, ...(naver?.items ?? [])];
+
+  // 변경 감지 (T-06, D-13): 마지막으로 전송한 소스 시각보다 새로운 tick만 보낸다.
+  // 시각이 바뀌었다면 가격이 같아도 새 tick으로 본다.
+  const freshData = allData.filter(data => {
+    const lastSent = lastSentTimestamp.get(data.ticker);
+    const isNew = lastSent === undefined || data.timestamp > lastSent;
+    if (!isNew) {
+      tickTotal.inc({ symbol: data.ticker, result: 'skipped_unchanged' });
     }
-    return { ...item, collectedAt };
+    return isNew;
   });
+
+  try {
+    if (allData.length > 0 && freshData.length === 0) {
+      console.log(`Fetched ${allData.length} items, no new ticks.`);
+    }
+    if (freshData.length > 0) {
+      console.log(`Successfully fetched ${allData.length} items (${freshData.length} new). Sending to Kafka and DB...`);
+
+      // --- 1. DB 적재 (TimescaleDB) ---
+      const { dbPool } = await import('../db.js');
+      const dbStartedAt = Date.now();
+      const client = await dbPool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const data of freshData) {
+          // timestamp는 검증을 통과한 값이고(T-05), 거래량 0은 정상값이라 null로 바꾸지 않는다.
+          await client.query(
+            `INSERT INTO market_ticks (time, symbol, category, price, change_rate, change_price, volume)
+             VALUES (to_timestamp($1 / 1000.0), $2, $3, $4, $5, $6, $7)`,
+            [
+              data.timestamp,
+              data.ticker,
+              data.category,
+              data.price,
+              data.changeRate,
+              data.changePrice,
+              data.volume ?? null
+            ]
+          );
+        }
+        await client.query('COMMIT');
+        dbInsertDuration.observe({ result: 'commit' }, Date.now() - dbStartedAt);
+      } catch (dbErr) {
+        await client.query('ROLLBACK');
+        dbInsertDuration.observe({ result: 'rollback' }, Date.now() - dbStartedAt);
+        console.error('Failed to insert into TimescaleDB:', dbErr);
+      } finally {
+        client.release();
+      }
+
+      // --- 2. Kafka 전송 ---
+      const producedAt = Date.now();
+      const messages = freshData.map(data => {
+        // Map ticker to symbol for internal TickData usage
+        const tickData = {
+          symbol: data.ticker,
+          category: data.category,
+          price: data.price,
+          changeRate: data.changeRate,
+          changePrice: data.changePrice,
+          timestamp: data.timestamp,
+          volume: data.volume,
+          collectedAt: data.collectedAt,
+          producedAt
+        };
+
+        return {
+          key: data.ticker,
+          value: JSON.stringify(tickData)
+        };
+      });
+
+      await producer.send({ topic: 'market-ticks', messages });
+      kafkaSendDuration.observe({}, Date.now() - producedAt);
+
+      // 전송에 성공한 뒤에만 "마지막 전송 시각"을 갱신한다. 실패하면 다음 주기에 다시 보낼 수 있도록.
+      for (const data of freshData) {
+        lastSentTimestamp.set(data.ticker, data.timestamp);
+        tickTotal.inc({ symbol: data.ticker, result: 'sent' });
+      }
+
+      // 콘솔 출력 테스트 (상위 3개만)
+      console.log('Sample Data Sent:', freshData.slice(0, 3).map(d => d.ticker));
+    }
+  } catch (error) {
+    // DB·Kafka 실패는 백오프하지 않는다 (외부 API 보호가 백오프의 목적)
+    console.error('Worker loop error:', error);
+  }
+
+  return yahoo.result;
+}
+
+// 수집 루프 (docs/Task_ORDER.md T-04)
+// - 이전 수집이 끝난 뒤에만 다음 수집을 예약하므로 겹쳐서 실행되지 않는다.
+// - 정상일 때는 수집 시작 시각 기준으로 POLLING_INTERVAL_MS 간격을 유지한다.
+// - Yahoo 수집이 실패하면 대기 시간을 2배씩 늘린다 (상한 MAX_BACKOFF_MS). 성공하면 바로 원래 간격으로 돌아온다.
+//   Naver는 보류 중(R-03)이고 항상 0건이라 판단에서 제외한다.
+let consecutiveFailures = 0;
+let lastCycleStartedAt: number | undefined;
+let lastMarketSummary: string | undefined;
+
+// 시장 상태에 따라 기본 주기를 정한다 (T-07, D-16). 하나라도 열려 있으면 활성 주기, 모두 닫혀 있으면 유휴 주기.
+// Yahoo는 요청 한 번에 10종을 돌려주므로 지표별로 다른 주기를 줄 수 없다.
+function baseInterval() {
+  const now = new Date(Date.now() + MARKET_CLOCK_OFFSET_MS);
+  const states = MARKETS.map(market => ({ id: market.id, open: market.isOpen(now) }));
+  for (const state of states) {
+    marketOpen.set({ market: state.id }, state.open ? 1 : 0);
+  }
+
+  const interval = states.some(state => state.open) ? POLLING_INTERVAL_MS : IDLE_POLLING_INTERVAL_MS;
+  const summary = states.map(state => `${state.id}=${state.open ? 'open' : 'closed'}`).join(' ');
+  if (summary !== lastMarketSummary) {
+    console.log(`Market hours: ${summary} -> polling every ${interval}ms`);
+    lastMarketSummary = summary;
+  }
+  return interval;
+}
+
+async function pollLoop() {
+  const cycleStartedAt = Date.now();
+  if (lastCycleStartedAt !== undefined) {
+    cycleStartInterval.observe({}, cycleStartedAt - lastCycleStartedAt);
+  }
+  lastCycleStartedAt = cycleStartedAt;
+
+  let yahooResult: FetchResult = 'empty';
+  try {
+    yahooResult = await runCycle();
+  } catch (error) {
+    console.error('Worker loop error:', error);
+  }
+  cycleDuration.observe({}, Date.now() - cycleStartedAt);
+
+  consecutiveFailures = yahooResult === 'success' ? 0 : consecutiveFailures + 1;
+  const interval = baseInterval();
+  // 백오프 상한은 현재 주기보다 짧아지지 않게 한다 (유휴 주기 60초가 백오프 때문에 줄어들지 않도록)
+  const targetDelay = consecutiveFailures === 0
+    ? interval
+    : Math.min(interval * 2 ** consecutiveFailures, Math.max(MAX_BACKOFF_MS, interval));
+
+  if (consecutiveFailures > 0) {
+    backoffTotal.inc();
+    console.warn(`Yahoo fetch ${yahooResult}: backing off, next poll in ${targetDelay}ms (consecutive failures: ${consecutiveFailures})`);
+  }
+  pollDelay.set({}, targetDelay / 1000);
+
+  setTimeout(pollLoop, Math.max(0, targetDelay - (Date.now() - cycleStartedAt)));
 }
 
 async function runIngestionWorker() {
   console.log('🚀 Data Ingestion Worker Started...');
-  console.log(`Polling interval: ${POLLING_INTERVAL_MS}ms`);
+  console.log(`Polling interval: ${POLLING_INTERVAL_MS}ms, fetch timeout: ${FETCH_TIMEOUT_MS}ms, max backoff: ${MAX_BACKOFF_MS}ms`);
+  console.log(`Naver collection: ${NAVER_ENABLED ? 'enabled' : 'disabled (on hold, R-03)'}`);
+  console.log(`Idle polling interval (all markets closed): ${IDLE_POLLING_INTERVAL_MS}ms`);
+  if (MARKET_CLOCK_OFFSET_MS !== 0) {
+    console.warn(`MARKET_CLOCK_OFFSET_MS=${MARKET_CLOCK_OFFSET_MS}: market hours are evaluated on a shifted clock (verification only).`);
+  }
+  if (FETCH_TIMEOUT_MS >= POLLING_INTERVAL_MS) {
+    console.warn('FETCH_TIMEOUT_MS is not shorter than POLLING_INTERVAL_MS: cycles may start later than the configured interval.');
+  }
 
   await producer.connect();
   console.log('Connected to Kafka producer.');
@@ -69,86 +295,12 @@ async function runIngestionWorker() {
   startMetricsLog('worker', metricsConfig.logIntervalMs);
   console.log(`Metrics server listening on :${metricsConfig.port} (internal only)`);
 
-  setInterval(async () => {
-    const cycleStartedAt = Date.now();
-    try {
-      console.log(`\n[${new Date().toISOString()}] Fetching market data...`);
-
-      const [yahooData, naverData] = await Promise.all([
-        collect('yahoo', fetchYahooData),
-        collect('naver', fetchNaverData)
-      ]);
-
-      const allData = [...yahooData, ...naverData];
-
-      if (allData.length > 0) {
-        console.log(`Successfully fetched ${allData.length} items. Sending to Kafka and DB...`);
-
-        // --- 1. DB 적재 (TimescaleDB) ---
-        const { dbPool } = await import('../db.js');
-        const dbStartedAt = Date.now();
-        const client = await dbPool.connect();
-        try {
-          await client.query('BEGIN');
-          for (const data of allData) {
-            await client.query(
-              `INSERT INTO market_ticks (time, symbol, category, price, change_rate, change_price, volume)
-               VALUES (to_timestamp($1 / 1000.0), $2, $3, $4, $5, $6, $7)`,
-              [
-                data.timestamp || Date.now(),
-                data.ticker,
-                data.category,
-                data.price,
-                data.changeRate,
-                data.changePrice,
-                data.volume || null
-              ]
-            );
-          }
-          await client.query('COMMIT');
-          dbInsertDuration.observe({ result: 'commit' }, Date.now() - dbStartedAt);
-        } catch (dbErr) {
-          await client.query('ROLLBACK');
-          dbInsertDuration.observe({ result: 'rollback' }, Date.now() - dbStartedAt);
-          console.error('Failed to insert into TimescaleDB:', dbErr);
-        } finally {
-          client.release();
-        }
-
-        // --- 2. Kafka 전송 ---
-        const producedAt = Date.now();
-        const messages = allData.map(data => {
-          // Map ticker to symbol for internal TickData usage
-          const tickData = {
-            symbol: data.ticker,
-            category: data.category,
-            price: data.price,
-            changeRate: data.changeRate,
-            changePrice: data.changePrice,
-            timestamp: data.timestamp,
-            volume: data.volume,
-            collectedAt: data.collectedAt,
-            producedAt
-          };
-
-          return {
-            key: data.ticker,
-            value: JSON.stringify(tickData)
-          };
-        });
-
-        await producer.send({ topic: 'market-ticks', messages });
-        kafkaSendDuration.observe({}, Date.now() - producedAt);
-
-        // 콘솔 출력 테스트 (상위 3개만)
-        console.log('Sample Data Sent:', allData.slice(0, 3).map(d => d.ticker));
-      }
-
-      cycleDuration.observe({}, Date.now() - cycleStartedAt);
-    } catch (error) {
-      console.error('Worker loop error:', error);
-    }
-  }, POLLING_INTERVAL_MS);
+  pollLoop();
 }
 
-runIngestionWorker().catch(console.error);
+// 시작에 실패하면(예: Kafka 연결 재시도 소진) 종료 코드 1로 끝낸다.
+// docker-compose의 restart: on-failure가 다시 띄우도록 하기 위함 (docs/Task_ORDER.md T-08, P-11).
+runIngestionWorker().catch(error => {
+  console.error('Worker failed to start:', error);
+  process.exit(1);
+});
