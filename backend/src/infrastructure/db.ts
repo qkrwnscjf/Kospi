@@ -2,12 +2,19 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
+// 유휴 연결 유지 (docs/Task_ORDER.md T-32). pg의 기본값(10초)이면 60초 간격 조회마다 연결을 다시 맺는다.
+// 0이면 유휴 연결을 닫지 않는다. 최대 연결 수(기본 10)는 그대로라 연결이 무한히 늘지는 않는다.
+const idleTimeoutValue = Number.parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS ?? '', 10);
+const DB_POOL_IDLE_TIMEOUT_MS = Number.isNaN(idleTimeoutValue) ? 0 : idleTimeoutValue;
+
 export const dbPool = new Pool({
   user: process.env.DB_USER || 'postgres',
   host: process.env.DB_HOST || 'localhost',
   database: process.env.DB_NAME || 'kospi',
   password: process.env.DB_PASSWORD || 'password',
   port: parseInt(process.env.DB_PORT || '5432', 10),
+  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT_MS,
+  keepAlive: true,
 });
 
 // 버전별 스키마 마이그레이션 (docs/Task_ORDER.md T-15 ~ T-18)
@@ -102,7 +109,85 @@ const MIGRATIONS: Migration[] = [
       `SELECT add_retention_policy('market_1d', drop_after => INTERVAL '1 year', if_not_exists => true)`,
     ],
   },
+  {
+    version: 3,
+    name: 'T-31 recreate aggregates with larger chunk intervals (5m: 7 days, 1h/1d: 30 days)',
+    statements: [
+      // T-31 (D-26, D-27, 2026-10-17 사용자 승인): 청크 간격은 새 청크에만 적용되므로 집계를 다시 만든다.
+      // 지워진 집계 데이터는 과거 데이터 채우기(버전 2)가 다시 채운다. 의존 관계 때문에 1일 → 1시간 → 5분 순서로 지운다.
+      `DROP MATERIALIZED VIEW IF EXISTS market_1d`,
+      `DROP MATERIALIZED VIEW IF EXISTS market_1h`,
+      `DROP MATERIALIZED VIEW IF EXISTS market_5m`,
+      `CREATE MATERIALIZED VIEW market_5m
+       WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+       SELECT time_bucket(INTERVAL '5 minutes', time) AS bucket,
+              symbol,
+              first(price, time) AS open,
+              max(price) AS high,
+              min(price) AS low,
+              last(price, time) AS close,
+              count(*) AS ticks
+       FROM market_ticks
+       GROUP BY time_bucket(INTERVAL '5 minutes', time), symbol
+       WITH NO DATA`,
+      setAggregateChunkInterval('market_5m', '7 days'),
+      `CREATE MATERIALIZED VIEW market_1h
+       WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+       SELECT time_bucket(INTERVAL '1 hour', bucket) AS bucket,
+              symbol,
+              first(open, bucket) AS open,
+              max(high) AS high,
+              min(low) AS low,
+              last(close, bucket) AS close,
+              sum(ticks) AS ticks
+       FROM market_5m
+       GROUP BY time_bucket(INTERVAL '1 hour', bucket), symbol
+       WITH NO DATA`,
+      setAggregateChunkInterval('market_1h', '30 days'),
+      `CREATE MATERIALIZED VIEW market_1d
+       WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+       SELECT time_bucket(INTERVAL '1 day', bucket) AS bucket,
+              symbol,
+              first(open, bucket) AS open,
+              max(high) AS high,
+              min(low) AS low,
+              last(close, bucket) AS close,
+              sum(ticks) AS ticks
+       FROM market_1h
+       GROUP BY time_bucket(INTERVAL '1 day', bucket), symbol
+       WITH NO DATA`,
+      setAggregateChunkInterval('market_1d', '30 days'),
+      // 집계를 지우면 갱신·보관 정책도 함께 지워지므로 다시 등록한다 (값은 마이그레이션 2와 같음).
+      `SELECT add_continuous_aggregate_policy('market_5m',
+         start_offset => INTERVAL '2 hours', end_offset => INTERVAL '5 minutes',
+         schedule_interval => INTERVAL '1 minute', if_not_exists => true)`,
+      `SELECT add_continuous_aggregate_policy('market_1h',
+         start_offset => INTERVAL '2 days', end_offset => INTERVAL '1 hour',
+         schedule_interval => INTERVAL '5 minutes', if_not_exists => true)`,
+      `SELECT add_continuous_aggregate_policy('market_1d',
+         start_offset => INTERVAL '7 days', end_offset => INTERVAL '1 day',
+         schedule_interval => INTERVAL '1 hour', if_not_exists => true)`,
+      `SELECT add_retention_policy('market_5m', drop_after => INTERVAL '1 year', if_not_exists => true)`,
+      `SELECT add_retention_policy('market_1h', drop_after => INTERVAL '1 year', if_not_exists => true)`,
+      `SELECT add_retention_policy('market_1d', drop_after => INTERVAL '1 year', if_not_exists => true)`,
+    ],
+  },
 ];
+
+// 집계의 실제 저장 테이블(materialization hypertable)을 찾아 청크 간격을 바꾼다 (T-31).
+// 데이터가 들어가기 전에 호출해야 모든 청크가 새 간격으로 만들어진다.
+function setAggregateChunkInterval(view: string, interval: string) {
+  return `DO $$
+    DECLARE target regclass;
+    BEGIN
+      SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name)::regclass
+        INTO STRICT target
+        FROM timescaledb_information.continuous_aggregates
+        WHERE view_name = '${view}';
+      PERFORM set_chunk_time_interval(target, INTERVAL '${interval}');
+    END
+  $$`;
+}
 
 // 마이그레이션이 실패하면 예외를 던진다. backend는 스키마 없이 뜨지 않고 종료한다 (restart: on-failure가 다시 시도).
 export const initDB = async () => {

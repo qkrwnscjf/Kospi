@@ -8,7 +8,8 @@ import type { YahooSymbolKey } from '../../shared/symbols.js';
 // 3시간보다 오래된 원본을 바로 지운다 (D-02). 집계는 원본이 지워져도 남는다.
 // 완료 기록(backfill_runs)이 있으면 다시 실행하지 않는다.
 
-const BACKFILL_VERSION = 1;
+// 버전 2: T-31(마이그레이션 3)에서 집계를 다시 만들었으므로 한 번 더 채운다 (D-27)
+const BACKFILL_VERSION = 2;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // 그래프별로 필요한 해상도만 받는다: 1일 그래프(5분 봉 24시간), 1주 그래프(1시간 봉 7일), 1개월~1년 그래프(1일 봉).

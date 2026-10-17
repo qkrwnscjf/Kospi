@@ -25,6 +25,7 @@ const storeLatency = new Latency('kospi_sink_store_latency_seconds', 'Worker col
 const duplicatesSkippedTotal = new Counter('kospi_sink_duplicates_skipped_total', 'Rows skipped by ON CONFLICT (symbol, time) DO NOTHING');
 // DB 용량 (BENCHMARK B-07)
 const dbSizeBytes = new Gauge('kospi_db_size_bytes', 'Size of the raw hypertable and each continuous aggregate in bytes');
+const dbChunks = new Gauge('kospi_db_chunks', 'Number of chunks of the raw hypertable and each continuous aggregate (T-31)');
 const DB_SIZE_INTERVAL_MS = 5 * 60 * 1000;
 
 // 여러 행을 INSERT 한 번으로 저장한다 (P-16). 단일 문장이라 전부 들어가거나 전부 실패한다.
@@ -56,6 +57,21 @@ async function recordDbSize() {
     `);
     for (const row of rows) {
       dbSizeBytes.set({ relation: row.relation }, Number(row.bytes));
+    }
+
+    const chunks = await dbPool.query<{ relation: string; chunks: string }>(`
+      SELECT 'market_ticks' AS relation, count(*)::text AS chunks
+      FROM timescaledb_information.chunks WHERE hypertable_name = 'market_ticks'
+      UNION ALL
+      SELECT ca.view_name::text AS relation, count(c.chunk_name)::text AS chunks
+      FROM timescaledb_information.continuous_aggregates ca
+      LEFT JOIN timescaledb_information.chunks c
+        ON c.hypertable_schema = ca.materialization_hypertable_schema
+       AND c.hypertable_name = ca.materialization_hypertable_name
+      GROUP BY ca.view_name
+    `);
+    for (const row of chunks.rows) {
+      dbChunks.set({ relation: row.relation }, Number(row.chunks));
     }
   } catch (error) {
     console.error(`DB size check failed: ${error instanceof Error ? error.message : String(error)}`);
