@@ -2,45 +2,41 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * 흑백 디자인 토큰 (docs/Task_ORDER.md T-54, D-35)
+ * 색은 모두 여기서 정의하고, 컴포넌트는 의미 이름(page, surface, line, fg, up, down)만 쓴다.
+ * 값은 "R G B" 형식이라 Tailwind에서 투명도(bg-fg/10 등)를 붙일 수 있다.
+ * 기본은 라이트이고, <html class="dark">이면 다크 값으로 바뀐다.
+ * 상승·하락은 미국식(초록·빨강, D-32)이며, 각 배경에서 글자 대비 4.5:1 이상이 되도록 고른 값이다.
+ */
 @layer base {
   :root {
-    --background-base: #050506;
-    --background-deep: #020203;
-    --background-elevated: #0a0a0c;
-    --foreground: #EDEDEF;
-    --foreground-muted: #8A8F98;
-    --accent: #5E6AD2;
-    --accent-bright: #6872D9;
-    --border-default: rgba(255, 255, 255, 0.06);
-    --border-hover: rgba(255, 255, 255, 0.10);
+    --color-page: 255 255 255;        /* 페이지 배경 */
+    --color-surface: 250 250 250;     /* 카드·메뉴 면 */
+    --color-line: 229 229 229;        /* 테두리 */
+    --color-line-strong: 163 163 163; /* 마우스를 올린 테두리 */
+    --color-fg: 10 10 10;             /* 본문 글자, 차트 선 */
+    --color-fg-muted: 115 115 115;    /* 보조 글자 */
+    --color-up: 21 128 61;            /* 상승 */
+    --color-down: 220 38 38;          /* 하락 */
+    color-scheme: light;
+  }
+
+  .dark {
+    --color-page: 0 0 0;
+    --color-surface: 10 10 10;
+    --color-line: 38 38 38;
+    --color-line-strong: 82 82 82;
+    --color-fg: 237 237 237;
+    --color-fg-muted: 163 163 163;
+    --color-up: 74 222 128;
+    --color-down: 248 113 113;
+    color-scheme: dark;
   }
 
   body {
-    @apply bg-background-base text-foreground antialiased selection:bg-accent/30;
-    font-family: "Inter", "Geist Sans", system-ui, sans-serif;
+    @apply bg-page text-fg antialiased selection:bg-fg/15;
   }
-}
-
-@layer utilities {
-  .text-gradient {
-    @apply bg-gradient-to-b from-white via-white/95 to-white/70 bg-clip-text text-transparent;
-  }
-  
-  .text-gradient-accent {
-    @apply bg-gradient-to-r from-[#5E6AD2] via-indigo-400 to-[#5E6AD2] bg-clip-text text-transparent;
-    background-size: 200% 100%;
-    animation: shimmer 2s linear infinite;
-  }
-}
-
-@keyframes shimmer {
-  0% { background-position: 0% 50%; }
-  100% { background-position: 200% 50%; }
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(0) rotate(0deg); }
-  50% { transform: translateY(-20px) rotate(1deg); }
 }
 
 /* Custom Scrollbar */
@@ -49,18 +45,14 @@
 }
 
 ::-webkit-scrollbar-track {
-  @apply bg-background-deep;
+  @apply bg-page;
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-white/10 rounded-full hover:bg-white/20 transition-colors;
+  @apply bg-fg/15 rounded-full hover:bg-fg/30 transition-colors;
 }
 
-/* Chart Tooltip Styles */
+/* Chart Tooltip */
 .recharts-tooltip-wrapper {
   outline: none !important;
-}
-
-.recharts-default-tooltip {
-  @apply !bg-background-elevated/90 !backdrop-blur-xl !border-white/10 !rounded-lg !shadow-2xl !p-2 !text-xs !font-medium !text-foreground !border !shadow-[0_8px_32px_rgba(0,0,0,0.5)];
 }

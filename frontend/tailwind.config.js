@@ -1,5 +1,10 @@
 /** @type {import('tailwindcss').Config} */
+
+// 색은 src/index.css의 CSS 변수(라이트·다크 두 벌)를 가리킨다 (docs/Task_ORDER.md T-54, D-35).
+const token = name => `rgb(var(--color-${name}) / <alpha-value>)`
+
 export default {
+  darkMode: 'class',
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
@@ -7,43 +12,30 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: {
-          deep: "#020203",
-          base: "#050506",
-          elevated: "#0a0a0c",
+        page: token('page'),
+        surface: token('surface'),
+        line: {
+          DEFAULT: token('line'),
+          strong: token('line-strong'),
         },
-        accent: {
-          DEFAULT: "#5E6AD2",
-          bright: "#6872D9",
-          glow: "rgba(94, 106, 210, 0.3)",
+        fg: {
+          DEFAULT: token('fg'),
+          muted: token('fg-muted'),
         },
-        foreground: {
-          DEFAULT: "#EDEDEF",
-          muted: "#8A8F98",
-          subtle: "rgba(255, 255, 255, 0.60)",
-        },
-        border: {
-          default: "rgba(255, 255, 255, 0.06)",
-          hover: "rgba(255, 255, 255, 0.10)",
-          accent: "rgba(94, 106, 210, 0.30)",
-        },
+        up: token('up'),
+        down: token('down'),
       },
-      animation: {
-        "float": "float 10s ease-in-out infinite",
-        "shimmer": "shimmer 2s linear infinite",
-      },
-      keyframes: {
-        float: {
-          "0%, 100%": { transform: "translateY(0) rotate(0deg)" },
-          "50%": { transform: "translateY(-20px) rotate(1deg)" },
-        },
-        shimmer: {
-          "0%": { backgroundPosition: "200% 0" },
-          "100%": { backgroundPosition: "-200% 0" },
-        },
-      },
-      backgroundImage: {
-        "noise": "url('/noise.svg')",
+      // 외부 웹 폰트를 불러오지 않고 운영체제 기본 글꼴을 쓴다 (T-44: 방문자 IP가 외부로 전달되지 않음)
+      fontFamily: {
+        sans: [
+          '-apple-system',
+          'BlinkMacSystemFont',
+          '"Segoe UI"',
+          '"Apple SD Gothic Neo"',
+          '"Malgun Gothic"',
+          '"Noto Sans KR"',
+          'sans-serif',
+        ],
       },
     },
   },

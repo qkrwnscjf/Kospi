@@ -16,11 +16,20 @@ export interface TickData {
 
 type TickListener = (tick: TickData) => void
 
+// 연결 상태 (docs/Task_ORDER.md T-33): 화면의 "실시간" 표시를 실제 연결 상태로 보여 주기 위함
+export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
+
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001'
 
 const listeners = new Map<string, Set<TickListener>>()
 const latestTicks = new Map<string, TickData>()
 let socket: Socket | undefined
+
+// 연결 상태와 마지막 수신 시각. React의 useSyncExternalStore로 읽는다.
+let connectionStatus: ConnectionStatus = 'connecting'
+let lastReceivedAt: number | null = null
+const statusListeners = new Set<() => void>()
+const notifyStatus = () => statusListeners.forEach(listener => listener())
 
 function getSocket() {
   if (socket) return socket
@@ -28,9 +37,19 @@ function getSocket() {
 
   // 처음 연결하거나 다시 연결되면, 지금 구독 중인 심볼을 모두 다시 구독한다 (서버의 방 정보는 연결마다 새로 시작).
   created.on('connect', () => {
+    connectionStatus = 'connected'
+    notifyStatus()
     for (const symbol of listeners.keys()) {
       created.emit('subscribe_market', symbol)
     }
+  })
+  created.on('disconnect', () => {
+    connectionStatus = 'disconnected'
+    notifyStatus()
+  })
+  created.on('connect_error', () => {
+    connectionStatus = 'disconnected'
+    notifyStatus()
   })
 
   created.on('tick', (tick: TickData) => {
@@ -38,12 +57,25 @@ function getSocket() {
     const previous = latestTicks.get(tick.symbol)
     if (previous && tick.timestamp < previous.timestamp) return
     latestTicks.set(tick.symbol, tick)
+    lastReceivedAt = Date.now()
+    notifyStatus()
     listeners.get(tick.symbol)?.forEach(listener => listener(tick))
   })
 
   socket = created
   return created
 }
+
+export function subscribeStatus(listener: () => void) {
+  getSocket()
+  statusListeners.add(listener)
+  return () => {
+    statusListeners.delete(listener)
+  }
+}
+
+export const getConnectionStatus = () => connectionStatus
+export const getLastReceivedAt = () => lastReceivedAt
 
 // 심볼의 tick을 구독하고, 구독 해제 함수를 돌려준다. 이미 받은 최신값이 있으면 바로 한 번 전달한다.
 export function subscribeTicks(symbol: string, listener: TickListener): () => void {

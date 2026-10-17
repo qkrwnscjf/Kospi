@@ -1,15 +1,22 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>KOSPI Dashboard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <meta name="color-scheme" content="light dark" />
+    <title>KOSPI Insight</title>
+    <!--
+      저장된 테마를 화면을 그리기 전에 적용해서, 다크 모드 사용자에게 흰 화면이 잠깐 보이지 않게 한다 (T-54).
+      기본은 라이트이고, 저장소를 쓸 수 없으면 라이트로 시작한다.
+    -->
+    <script>
+      try {
+        if (localStorage.getItem('kospi-theme') === 'dark') document.documentElement.classList.add('dark')
+      } catch (e) {}
+    </script>
   </head>
-  <body class="bg-background-base text-foreground antialiased selection:bg-accent/30">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

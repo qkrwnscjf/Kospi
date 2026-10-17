@@ -1,6 +1,11 @@
-import { useEffect, useState } from 'react'
-import { subscribeTicks, type TickData } from '@/lib/marketSocket'
+import { useEffect, useState, useSyncExternalStore } from 'react'
+import { getConnectionStatus, getLastReceivedAt, subscribeStatus, subscribeTicks, type TickData } from '@/lib/marketSocket'
 
+// 실시간 연결 상태와 마지막 데이터 수신 시각 (T-33). 공유 소켓 1개의 상태다.
+export const useConnectionStatus = () => useSyncExternalStore(subscribeStatus, getConnectionStatus)
+export const useLastReceivedAt = () => useSyncExternalStore(subscribeStatus, getLastReceivedAt)
+
+// 차트의 점 하나 (시각 ms, 값)
 export interface ChartPoint {
   time: number
   value: number
