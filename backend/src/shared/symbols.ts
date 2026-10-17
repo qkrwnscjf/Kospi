@@ -37,3 +37,12 @@ export const YAHOO_KEYS = Object.keys(YAHOO_SYMBOLS) as YahooSymbolKey[];
 
 export const isYahooSymbolKey = (value: string): value is YahooSymbolKey =>
   Object.prototype.hasOwnProperty.call(YAHOO_SYMBOLS, value);
+
+// Naver 6종의 내부 심볼 (수집은 보류 중, R-03). 제공처 심볼 표는 naver-api.ts에 있다.
+export const NAVER_KEYS = ['VKOSPI', 'KRX_SEMI', 'KRX_IT', 'KRX_AUTO', 'KRX_BANK', 'KRX_BIO'] as const;
+
+// 브라우저가 구독할 수 있는 심볼 (docs/security.md SEC-005). 이 목록에 없는 값으로는 방(room)을 만들지 않는다.
+const SUBSCRIBABLE_SYMBOLS = new Set<string>([...YAHOO_KEYS, ...NAVER_KEYS]);
+
+export const isSubscribableSymbol = (value: unknown): value is string =>
+  typeof value === 'string' && SUBSCRIBABLE_SYMBOLS.has(value);

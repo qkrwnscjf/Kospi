@@ -4,6 +4,7 @@ import type { NormalizedMarketData } from './normalizer.js';
 import { MARKETS } from './market-hours.js';
 import { producer, TOPICS, ensureTopics } from '../kafka.js';
 import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsServer } from '../metrics.js';
+import { registerShutdown } from '../shutdown.js';
 
 const readIntEnv = (name: string, fallback: number) => Number.parseInt(process.env[name] ?? '', 10) || fallback;
 
@@ -21,6 +22,10 @@ const MARKET_CLOCK_OFFSET_MS = Number.parseInt(process.env.MARKET_CLOCK_OFFSET_M
 const NAVER_ENABLED = process.env.NAVER_ENABLED === 'true';
 // 검증용: true이면 시작할 때 잘못된 메시지 2건을 한 번 보낸다(기본 끔). 컨슈머 방어(T-13)를 확인하기 위함
 const KAFKA_TEST_INJECT_INVALID = process.env.KAFKA_TEST_INJECT_INVALID === 'true';
+// 검증용: true이면 변경 감지(T-06)를 건너뛰고 매 주기 모두 전송한다(기본 끔).
+// 장이 닫힌 시간(주말)에도 실시간 경로(Kafka → Gateway → WebSocket)의 지연을 측정하기 위함 (T-23, B-05).
+// 같은 (symbol, time)은 DB Sink의 유니크 제약(T-15)으로 건너뛰도록 되어 있다.
+const WORKER_TEST_SEND_UNCHANGED = process.env.WORKER_TEST_SEND_UNCHANGED === 'true';
 
 // 측정 지표 (docs/Task_ORDER.md T-01)
 const fetchDuration = new Latency('kospi_worker_fetch_duration_seconds', 'External API fetch duration by source');
@@ -130,7 +135,7 @@ async function runCycle(): Promise<FetchResult> {
   // 시각이 바뀌었다면 가격이 같아도 새 tick으로 본다.
   const freshData = allData.filter(data => {
     const lastSent = lastSentTimestamp.get(data.ticker);
-    const isNew = lastSent === undefined || data.timestamp > lastSent;
+    const isNew = WORKER_TEST_SEND_UNCHANGED || lastSent === undefined || data.timestamp > lastSent;
     if (!isNew) {
       tickTotal.inc({ symbol: data.ticker, result: 'skipped_unchanged' });
     }
@@ -196,6 +201,11 @@ let consecutiveFailures = 0;
 let lastCycleStartedAt: number | undefined;
 let lastMarketSummary: string | undefined;
 
+// 종료 처리 (docs/Task_ORDER.md T-28): 다음 수집 예약을 취소하고, 진행 중인 수집이 끝날 때까지 기다린다.
+let stopping = false;
+let nextPollTimer: ReturnType<typeof setTimeout> | undefined;
+let currentCycle: Promise<void> | undefined;
+
 // 시장 상태에 따라 기본 주기를 정한다 (T-07, D-16). 하나라도 열려 있으면 활성 주기, 모두 닫혀 있으면 유휴 주기.
 // Yahoo는 요청 한 번에 10종을 돌려주므로 지표별로 다른 주기를 줄 수 없다.
 function baseInterval() {
@@ -214,7 +224,14 @@ function baseInterval() {
   return interval;
 }
 
-async function pollLoop() {
+function pollLoop() {
+  if (stopping) return;
+  currentCycle = pollOnce().finally(() => {
+    currentCycle = undefined;
+  });
+}
+
+async function pollOnce() {
   const cycleStartedAt = Date.now();
   if (lastCycleStartedAt !== undefined) {
     cycleStartInterval.observe({}, cycleStartedAt - lastCycleStartedAt);
@@ -242,7 +259,15 @@ async function pollLoop() {
   }
   pollDelay.set({}, targetDelay / 1000);
 
-  setTimeout(pollLoop, Math.max(0, targetDelay - (Date.now() - cycleStartedAt)));
+  if (!stopping) {
+    nextPollTimer = setTimeout(pollLoop, Math.max(0, targetDelay - (Date.now() - cycleStartedAt)));
+  }
+}
+
+async function stopPolling() {
+  stopping = true;
+  clearTimeout(nextPollTimer);
+  await currentCycle;
 }
 
 async function runIngestionWorker() {
@@ -272,11 +297,19 @@ async function runIngestionWorker() {
     });
     console.warn('KAFKA_TEST_INJECT_INVALID=true: sent 2 invalid test messages (verification only).');
   }
+  if (WORKER_TEST_SEND_UNCHANGED) {
+    console.warn('WORKER_TEST_SEND_UNCHANGED=true: change detection is off, every polled tick is sent (verification only).');
+  }
 
   // Kafka 연결 성공 후에 시작한다. 연결 실패 시 메트릭 서버 때문에 프로세스가 살아남지 않도록.
   startMetricsServer(metricsConfig.port);
   startMetricsLog('worker', metricsConfig.logIntervalMs);
   console.log(`Metrics server listening on :${metricsConfig.port} (internal only)`);
+
+  registerShutdown('worker', [
+    { name: 'poll loop', run: () => stopPolling() },
+    { name: 'kafka producer', run: () => producer.disconnect() },
+  ]);
 
   pollLoop();
 }

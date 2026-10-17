@@ -4,6 +4,7 @@ import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsSe
 import { parseTick } from '../../shared/tick-validation.js';
 import type { TickData } from '../../shared/types.js';
 import { runBackfillOnce } from './backfill.js';
+import { registerShutdown } from '../shutdown.js';
 
 // DB 적재 컨슈머 (docs/Task_ORDER.md T-12, D-18)
 // worker 대신 Kafka의 market-ticks를 읽어 TimescaleDB에 저장한다. Kafka가 단일 출처가 된다.
@@ -154,6 +155,14 @@ async function run() {
     .finally(() => void recordDbSize());
 
   setInterval(() => void recordDbSize(), DB_SIZE_INTERVAL_MS);
+
+  // 종료 처리 (docs/Task_ORDER.md T-28): 컨슈머를 먼저 끊는다. kafkajs는 처리 중인 묶음이 끝날 때까지 기다린 뒤 그룹에서 나간다.
+  // 커밋하지 못한 묶음은 다음 기동에서 다시 처리되고, 중복은 유니크 제약이 건너뛴다(at-least-once).
+  registerShutdown('db-sink', [
+    { name: 'kafka consumer', run: () => consumer.disconnect() },
+    { name: 'dlq producer', run: () => dlqProducer.disconnect() },
+    { name: 'db pool', run: () => dbPool.end() },
+  ]);
 }
 
 // 시작에 실패하면 종료 코드 1로 끝내서 docker-compose가 다시 띄우게 한다 (T-08과 같은 방식).

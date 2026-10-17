@@ -1,7 +1,7 @@
 import { cn } from '@/lib/utils'
 import { LayoutDashboard, Globe, TrendingUp, Activity, Terminal } from 'lucide-react'
 import { motion } from 'framer-motion'
-import { useMarketData } from '@/hooks/useMarketData'
+import { useLatestTick } from '@/hooks/useMarketData'
 
 const CATEGORIES = [
   { id: 'category1', name: '국내 전광판', icon: LayoutDashboard },
@@ -16,8 +16,9 @@ interface HeaderProps {
 }
 
 export function Header({ activeCategory, onCategoryChange }: HeaderProps) {
-  const { currentPrice: kospiPrice } = useMarketData('KOSPI', [], '실시간');
-  const { currentPrice: usdPrice } = useMarketData('USD/KRW', [], '실시간');
+  // 이전에는 지표마다 소켓을 따로 열었다. 이제 공유 소켓으로 최신값만 받는다 (T-24).
+  const kospiPrice = useLatestTick('KOSPI')?.price;
+  const usdPrice = useLatestTick('USD/KRW')?.price;
 
   return (
     <header className="w-full pt-16 pb-8 relative flex flex-col items-center">

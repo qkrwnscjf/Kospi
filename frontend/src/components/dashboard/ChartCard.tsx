@@ -1,32 +1,62 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { AreaChart, Area, ResponsiveContainer, YAxis, Tooltip, XAxis, CartesianGrid } from 'recharts'
 import { TrendingUp, TrendingDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useMarketData } from '@/hooks/useMarketData'
+import { useMarketData, type ChartStatus } from '@/hooks/useMarketData'
 
 interface ChartCardProps {
   title: string
-  current: string
-  change: string
-  isUp: boolean
-  data: any[]
-  symbol?: string
+  symbol: string
+  ready: boolean
 }
 
 const TIME_RANGES = ['실시간', '1일', '1주', '1개월', '3개월', '1년']
 
-export function ChartCard({ title, current, change, isUp: initialIsUp, data, symbol }: ChartCardProps) {
+// 데이터 신선도 표시 (docs/Task_ORDER.md T-27): 마지막 값의 소스 기준 시각이 지금으로부터 얼마나 지났는지.
+function formatAge(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  if (seconds < 60) return `${seconds}초 전`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}분 전`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}시간 전`
+  return `${Math.floor(hours / 24)}일 전`
+}
+
+// 차트 영역에 데이터 대신 보여 줄 안내 문구. 데이터가 있으면 null.
+function chartMessage(status: ChartStatus, points: number, isRealtime: boolean) {
+  if (status === 'not_ready') return '데이터 준비 중' // T-26, R-04
+  if (status === 'error') return '데이터를 불러오지 못했습니다'
+  if (points > 0) return null
+  if (status === 'loading') return '불러오는 중'
+  return isRealtime ? '실시간 데이터 수신 대기 중' : '표시할 데이터가 없습니다'
+}
+
+// 1초마다 현재 시각을 갱신한다 (신선도 표시용).
+function useNow(intervalMs: number) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(timer)
+  }, [intervalMs])
+  return now
+}
+
+export function ChartCard({ title, symbol, ready }: ChartCardProps) {
   const cardRef = useRef<HTMLDivElement>(null)
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 })
   const [isHovered, setIsHovered] = useState(false)
   const [activeRange, setActiveRange] = useState('실시간')
+  const now = useNow(1000)
 
-  const { currentPrice, priceChange, chartData } = useMarketData(symbol || '', data, activeRange)
+  const { latest, chartData, status } = useMarketData(symbol, activeRange, ready)
 
-  const displayCurrent = currentPrice !== null ? currentPrice.toLocaleString() : current
-  const displayChange = priceChange !== null ? (priceChange > 0 ? `+${priceChange.toFixed(2)}` : priceChange.toFixed(2)) : change
-  const isUp = priceChange !== null ? priceChange > 0 : initialIsUp
+  const displayCurrent = latest ? latest.price.toLocaleString() : '—'
+  // 등락률은 모든 지표에서 % 단위다 (T-27, P-19: 이전에는 문자열에 % 조건을 걸어서 한 번도 표시되지 않았음)
+  const displayChange = latest ? `${latest.changeRate > 0 ? '+' : ''}${latest.changeRate.toFixed(2)}%` : null
+  const isUp = latest ? latest.changeRate > 0 : true
+  const message = chartMessage(status, chartData.length, activeRange === '실시간')
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!cardRef.current) return
@@ -109,16 +139,26 @@ export function ChartCard({ title, current, change, isUp: initialIsUp, data, sym
             <div className="text-2xl font-bold text-gradient">
               {displayCurrent}
             </div>
+            {latest && (
+              <div
+                className="text-[10px] font-mono text-foreground-muted mt-0.5"
+                title={new Date(latest.timestamp).toLocaleString()}
+              >
+                기준 {formatAge(now - latest.timestamp)}
+              </div>
+            )}
           </div>
-          <div className={cn(
-            "flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border",
-            isUp 
-              ? "text-green-400 bg-green-400/5 border-green-400/20 shadow-[0_0_20px_rgba(74,222,128,0.1)]" 
-              : "text-red-400 bg-red-400/5 border-red-400/20 shadow-[0_0_20px_rgba(248,113,113,0.1)]"
-          )}>
-            {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-            {displayChange}{typeof displayChange === 'number' && !title.includes('환율') && !title.includes('USD') ? '%' : ''}
-          </div>
+          {displayChange !== null && (
+            <div className={cn(
+              "flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border",
+              isUp
+                ? "text-green-400 bg-green-400/5 border-green-400/20 shadow-[0_0_20px_rgba(74,222,128,0.1)]"
+                : "text-red-400 bg-red-400/5 border-red-400/20 shadow-[0_0_20px_rgba(248,113,113,0.1)]"
+            )}>
+              {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+              {displayChange}
+            </div>
+          )}
         </div>
 
         {/* Time Range Selector */}
@@ -140,6 +180,11 @@ export function ChartCard({ title, current, change, isUp: initialIsUp, data, sym
         </div>
 
         <div className="flex-1 -mx-2 mb-2 relative">
+          {message && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center text-xs font-mono tracking-wider text-foreground-muted">
+              {message}
+            </div>
+          )}
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
               <defs>
@@ -191,7 +236,8 @@ export function ChartCard({ title, current, change, isUp: initialIsUp, data, sym
                 strokeWidth={2}
                 fill={`url(#gradient-${title})`}
                 isAnimationActive={true}
-                animationDuration={1000}
+                /* 1초 애니메이션 동안 새 값이 늦게 그려져서 300ms로 줄였다 (T-27) */
+                animationDuration={300}
               />
             </AreaChart>
           </ResponsiveContainer>

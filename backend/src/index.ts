@@ -2,10 +2,12 @@ import 'dotenv/config';
 import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
 import fastifySocketIO from 'fastify-socket.io';
-import { initMarketGateway } from './domains/market/market.gateway.js';
+import { initMarketGateway, stopMarketGateway } from './domains/market/market.gateway.js';
 import { historyController, startHistorySelfCheck } from './domains/history/history.controller.js';
-import { initDB } from './infrastructure/db.js';
+import { dbPool, initDB } from './infrastructure/db.js';
+import { redis } from './infrastructure/redis.js';
 import { metricsConfig, startMetricsLog, startMetricsServer } from './infrastructure/metrics.js';
+import { registerShutdown } from './infrastructure/shutdown.js';
 
 const fastify = Fastify({ logger: true });
 
@@ -18,7 +20,9 @@ fastify.register(fastifyCors, {
 fastify.register(fastifySocketIO as any, {
   cors: {
     origin: '*',
-  }
+  },
+  // 브라우저가 보내는 메시지는 구독 요청(심볼 이름)뿐이라 작게 제한한다 (docs/security.md SEC-005). 기본값은 1MB.
+  maxHttpBufferSize: 10_000,
 });
 
 // Register REST Controllers
@@ -54,6 +58,14 @@ const start = async () => {
     startMetricsLog('backend', metricsConfig.logIntervalMs);
     fastify.log.info(`Metrics server listening on :${metricsConfig.port} (internal only)`);
     startHistorySelfCheck();
+
+    // 종료 처리 (docs/Task_ORDER.md T-28): 새 요청과 WebSocket을 먼저 닫고, Kafka 컨슈머 → Redis → DB 순서로 정리한다.
+    registerShutdown('backend', [
+      { name: 'http + socket.io', run: () => fastify.close() },
+      { name: 'kafka', run: () => stopMarketGateway() },
+      { name: 'redis', run: () => redis.quit() },
+      { name: 'db pool', run: () => dbPool.end() },
+    ]);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

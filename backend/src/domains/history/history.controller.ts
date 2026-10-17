@@ -2,12 +2,19 @@ import type { FastifyInstance } from 'fastify';
 import { redis } from '../../infrastructure/redis.js';
 import { dbPool } from '../../infrastructure/db.js';
 import { Latency } from '../../infrastructure/metrics.js';
-import { isYahooSymbolKey } from '../../shared/symbols.js';
+import { isSubscribableSymbol, isYahooSymbolKey } from '../../shared/symbols.js';
 import type { YahooSymbolKey } from '../../shared/symbols.js';
 
 // 측정 지표 (docs/Task_ORDER.md T-01, BENCHMARK M-11)
 const historyDuration = new Latency('kospi_history_request_duration_seconds', 'History API response time by result (cache_hit / cache_miss / not_ready / error)');
 const selfCheckDuration = new Latency('kospi_history_self_check_duration_seconds', 'History self-check DB query time (cache bypassed)');
+const recentDuration = new Latency('kospi_history_recent_duration_seconds', 'Recent ticks API response time by result (cache_hit / cache_miss / not_ready / error)');
+
+// 실시간 차트의 첫 화면용 최근 tick (docs/Task_ORDER.md T-25, D-29)
+// 원본 테이블(market_ticks, 3시간 보관)에서 심볼별 최근 tick을 돌려준다. 실시간 차트와 같은 해상도라 이어 붙여도 섞이지 않는다.
+// 개수는 고정이라 요청마다 다른 값으로 캐시나 DB를 부풀릴 수 없다.
+const RECENT_TICKS_LIMIT = 50;
+const RECENT_CACHE_TTL_S = 5;
 
 type Timeframe = '1일' | '1주' | '1개월' | '3개월' | '1년';
 type HistoryPoint = { time: number; value: number };
@@ -42,7 +49,52 @@ async function getHistory(ticker: YahooSymbolKey, timeframe: Timeframe): Promise
   return rows;
 }
 
+// 최근 tick (T-25). 시각은 소스 기준 시각(실시간 tick의 timestamp와 같은 기준)이다.
+async function getRecentTicks(ticker: YahooSymbolKey): Promise<HistoryPoint[]> {
+  const { rows } = await dbPool.query<HistoryPoint>(
+    `SELECT (extract(epoch FROM time) * 1000)::float8 AS time, price::float8 AS value
+     FROM market_ticks
+     WHERE symbol = $1
+     ORDER BY time DESC
+     LIMIT $2`,
+    [ticker, RECENT_TICKS_LIMIT]
+  );
+  return rows.reverse();
+}
+
 export const historyController = async (fastify: FastifyInstance) => {
+  fastify.get('/api/v1/market/recent', async (request, reply) => {
+    const startedAt = Date.now();
+    const { ticker } = request.query as { ticker?: string };
+
+    // 알 수 없는 심볼은 받지 않는다. 응답에도 받은 값을 되돌려 쓰지 않는다 (SEC-005와 같은 기준).
+    if (!isSubscribableSymbol(ticker)) {
+      return reply.code(400).send({ error: 'a known ticker is required' });
+    }
+    if (!isYahooSymbolKey(ticker)) {
+      recentDuration.observe({ result: 'not_ready' }, Date.now() - startedAt);
+      return { ticker, data: [], status: 'not_ready' };
+    }
+
+    try {
+      const cacheKey = `recent:${ticker}`;
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        recentDuration.observe({ result: 'cache_hit' }, Date.now() - startedAt);
+        return JSON.parse(cached);
+      }
+
+      const responsePayload = { ticker, data: await getRecentTicks(ticker) };
+      await redis.set(cacheKey, JSON.stringify(responsePayload), 'EX', RECENT_CACHE_TTL_S);
+      recentDuration.observe({ result: 'cache_miss' }, Date.now() - startedAt);
+      return responsePayload;
+    } catch (err) {
+      recentDuration.observe({ result: 'error' }, Date.now() - startedAt);
+      console.error(`Error fetching recent ticks for ${ticker}:`, err);
+      return reply.code(500).send({ error: 'Failed to fetch recent ticks' });
+    }
+  });
+
   fastify.get('/api/v1/market/history', async (request, reply) => {
     const startedAt = Date.now();
     const { ticker, timeframe } = request.query as { ticker?: string; timeframe?: string };
@@ -110,6 +162,25 @@ export function startHistorySelfCheck() {
         } catch (error) {
           results.push({ ticker, timeframe, error: error instanceof Error ? error.message : String(error) });
         }
+      }
+
+      // 최근 tick API (T-25)
+      const startedAt = Date.now();
+      try {
+        const data = await getRecentTicks(ticker);
+        const last = data[data.length - 1];
+        const ordered = data.every((point, index) => index === 0 || point.time > (data[index - 1]?.time ?? 0));
+        results.push({
+          ticker,
+          timeframe: 'recent',
+          points: data.length,
+          last_age_s: last ? Math.round((Date.now() - last.time) / 1000) : null,
+          ordered,
+          non_positive: data.filter(point => point.value <= 0).length,
+          ms: Date.now() - startedAt,
+        });
+      } catch (error) {
+        results.push({ ticker, timeframe: 'recent', error: error instanceof Error ? error.message : String(error) });
       }
     }
     console.log(`[history-check] ${JSON.stringify({ results })}`);
