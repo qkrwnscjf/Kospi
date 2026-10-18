@@ -1,7 +1,10 @@
 import { fetchYahooData } from './yahoo-api.js';
 import { fetchNaverData } from './naver-api.js';
 import type { NormalizedMarketData } from './normalizer.js';
-import { MARKETS } from './market-hours.js';
+import { MARKETS, YAHOO_MARKET, decideMarketStatus } from './market-hours.js';
+import { YAHOO_KEYS, isYahooSymbolKey } from '../../shared/symbols.js';
+import type { YahooSymbolKey } from '../../shared/symbols.js';
+import type { MarketState } from '../../shared/market-state.js';
 import { producer, TOPICS, ensureTopics } from '../kafka.js';
 import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsServer } from '../metrics.js';
 import { registerShutdown } from '../shutdown.js';
@@ -16,6 +19,9 @@ const FETCH_TIMEOUT_MS = readIntEnv('FETCH_TIMEOUT_MS', 3000);
 const MAX_BACKOFF_MS = readIntEnv('MAX_BACKOFF_MS', 60000);
 // 모든 시장이 닫혀 있을 때의 polling 주기 (docs/Task_ORDER.md T-07, D-16)
 const IDLE_POLLING_INTERVAL_MS = readIntEnv('IDLE_POLLING_INTERVAL_MS', 60000);
+// 시간표상 장 시간인데 소스가 휴장(공휴일 등)일 때의 주기 (T-56, D-40).
+// 휴장일의 호출을 줄이면서, 다음 날 개장은 이 주기 안에 알아채도록 유휴 주기보다 짧게 둔다.
+const HOLIDAY_POLLING_INTERVAL_MS = readIntEnv('HOLIDAY_POLLING_INTERVAL_MS', 15000);
 // 검증용: 장 시간을 판단할 때만 시계를 옮긴다(기본 0). 실제 수집 시각과 데이터에는 영향이 없다 (T-07)
 const MARKET_CLOCK_OFFSET_MS = Number.parseInt(process.env.MARKET_CLOCK_OFFSET_MS ?? '', 10) || 0;
 // Naver 수집은 보류 중(R-03)이라 기본값은 끔. "true"일 때만 수집한다 (docs/Task_ORDER.md T-10, D-15)
@@ -49,6 +55,12 @@ const marketOpen = new Gauge('kospi_worker_market_open', 'Whether each market is
 // 변경 감지 (docs/Task_ORDER.md T-06, D-13). 심볼별로 마지막으로 Kafka 전송에 성공한 소스 시각.
 const tickTotal = new Counter('kospi_worker_tick_total', 'Collected ticks by symbol and result (sent / skipped_unchanged)');
 const lastSentTimestamp = new Map<string, number>();
+// 장 상태가 바뀌면 시각이 같아도 한 번 보낸다. 화면의 "장중 / 휴장" 표시가 바뀌게 하기 위함 (T-56)
+const lastSentMarketState = new Map<string, MarketState>();
+
+// 지표별로 가장 최근에 받은 소스 장 상태 (전송 여부와 상관없이). 수집 주기 판단에 쓴다 (T-56)
+const latestSourceState = new Map<YahooSymbolKey, MarketState>();
+let lastSourceStateSummary: string | undefined;
 
 type CollectedMarketData = NormalizedMarketData & { collectedAt: number };
 type FetchResult = 'success' | 'empty' | 'timeout' | 'error';
@@ -131,11 +143,24 @@ async function runCycle(): Promise<FetchResult> {
 
   const allData = [...yahoo.items, ...(naver?.items ?? [])];
 
+  // 소스 장 상태 기록 (T-56)
+  for (const item of yahoo.items) {
+    if (item.marketState && isYahooSymbolKey(item.ticker)) {
+      latestSourceState.set(item.ticker, item.marketState);
+    }
+  }
+  const sourceSummary = YAHOO_KEYS.map(key => `${key}=${latestSourceState.get(key) ?? '?'}`).join(' ');
+  if (sourceSummary !== lastSourceStateSummary) {
+    console.log(`Source market states: ${sourceSummary}`);
+    lastSourceStateSummary = sourceSummary;
+  }
+
   // 변경 감지 (T-06, D-13): 마지막으로 전송한 소스 시각보다 새로운 tick만 보낸다.
-  // 시각이 바뀌었다면 가격이 같아도 새 tick으로 본다.
+  // 시각이 바뀌었다면 가격이 같아도 새 tick으로 본다. 장 상태가 바뀐 경우도 보낸다 (T-56).
   const freshData = allData.filter(data => {
     const lastSent = lastSentTimestamp.get(data.ticker);
-    const isNew = WORKER_TEST_SEND_UNCHANGED || lastSent === undefined || data.timestamp > lastSent;
+    const stateChanged = data.marketState !== undefined && data.marketState !== lastSentMarketState.get(data.ticker);
+    const isNew = WORKER_TEST_SEND_UNCHANGED || lastSent === undefined || data.timestamp > lastSent || stateChanged;
     if (!isNew) {
       tickTotal.inc({ symbol: data.ticker, result: 'skipped_unchanged' });
     }
@@ -163,7 +188,8 @@ async function runCycle(): Promise<FetchResult> {
           timestamp: data.timestamp,
           volume: data.volume,
           collectedAt: data.collectedAt,
-          producedAt
+          producedAt,
+          marketState: data.marketState,
         };
 
         return {
@@ -177,7 +203,8 @@ async function runCycle(): Promise<FetchResult> {
 
       // 전송에 성공한 뒤에만 "마지막 전송 시각"을 갱신한다. 실패하면 다음 주기에 다시 보낼 수 있도록.
       for (const data of freshData) {
-        lastSentTimestamp.set(data.ticker, data.timestamp);
+        lastSentTimestamp.set(data.ticker, Math.max(data.timestamp, lastSentTimestamp.get(data.ticker) ?? 0));
+        if (data.marketState) lastSentMarketState.set(data.ticker, data.marketState);
         tickTotal.inc({ symbol: data.ticker, result: 'sent' });
       }
 
@@ -206,17 +233,25 @@ let stopping = false;
 let nextPollTimer: ReturnType<typeof setTimeout> | undefined;
 let currentCycle: Promise<void> | undefined;
 
-// 시장 상태에 따라 기본 주기를 정한다 (T-07, D-16). 하나라도 열려 있으면 활성 주기, 모두 닫혀 있으면 유휴 주기.
+// 시장 상태에 따라 기본 주기를 정한다 (T-07, D-16, T-56).
+// 하나라도 장중이면 활성 주기, 장중은 없고 휴장(시간표상 장 시간인데 소스가 닫힘)이 있으면 휴장 주기, 모두 닫혀 있으면 유휴 주기.
 // Yahoo는 요청 한 번에 10종을 돌려주므로 지표별로 다른 주기를 줄 수 없다.
 function baseInterval() {
   const now = new Date(Date.now() + MARKET_CLOCK_OFFSET_MS);
-  const states = MARKETS.map(market => ({ id: market.id, open: market.isOpen(now) }));
+  const states = MARKETS.map(market => {
+    const sourceStates = YAHOO_KEYS.filter(key => YAHOO_MARKET[key] === market.id).map(key => latestSourceState.get(key));
+    return { id: market.id, status: decideMarketStatus(market.isOpen(now), sourceStates) };
+  });
   for (const state of states) {
-    marketOpen.set({ market: state.id }, state.open ? 1 : 0);
+    marketOpen.set({ market: state.id }, state.status === 'open' ? 1 : 0);
   }
 
-  const interval = states.some(state => state.open) ? POLLING_INTERVAL_MS : IDLE_POLLING_INTERVAL_MS;
-  const summary = states.map(state => `${state.id}=${state.open ? 'open' : 'closed'}`).join(' ');
+  const interval = states.some(state => state.status === 'open')
+    ? POLLING_INTERVAL_MS
+    : states.some(state => state.status === 'holiday')
+      ? HOLIDAY_POLLING_INTERVAL_MS
+      : IDLE_POLLING_INTERVAL_MS;
+  const summary = states.map(state => `${state.id}=${state.status}`).join(' ');
   if (summary !== lastMarketSummary) {
     console.log(`Market hours: ${summary} -> polling every ${interval}ms`);
     lastMarketSummary = summary;
@@ -274,7 +309,7 @@ async function runIngestionWorker() {
   console.log('🚀 Data Ingestion Worker Started...');
   console.log(`Polling interval: ${POLLING_INTERVAL_MS}ms, fetch timeout: ${FETCH_TIMEOUT_MS}ms, max backoff: ${MAX_BACKOFF_MS}ms`);
   console.log(`Naver collection: ${NAVER_ENABLED ? 'enabled' : 'disabled (on hold, R-03)'}`);
-  console.log(`Idle polling interval (all markets closed): ${IDLE_POLLING_INTERVAL_MS}ms`);
+  console.log(`Idle polling interval (all markets closed): ${IDLE_POLLING_INTERVAL_MS}ms, holiday interval (source closed during market hours): ${HOLIDAY_POLLING_INTERVAL_MS}ms`);
   if (MARKET_CLOCK_OFFSET_MS !== 0) {
     console.warn(`MARKET_CLOCK_OFFSET_MS=${MARKET_CLOCK_OFFSET_MS}: market hours are evaluated on a shifted clock (verification only).`);
   }

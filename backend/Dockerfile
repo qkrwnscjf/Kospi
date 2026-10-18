@@ -10,6 +10,8 @@ RUN npm install
 # Copy source code and build
 COPY . .
 RUN npm run build
+# 테스트가 실패하면 이미지가 만들어지지 않는다 (docs/Task_ORDER.md T-45). Node 내장 node:test + 기존 tsx, 새 의존성 없음
+RUN npm test
 
 # Expose API port
 EXPOSE 3001

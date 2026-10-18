@@ -183,6 +183,8 @@ services:
       # 데이터소스·대시보드 자동 설정 (docs/Task_ORDER.md T-02). 모두 읽기 전용.
       - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      # 알림 규칙 (T-46). 수신처는 만들지 않고 규칙만 등록한다. 읽기 전용.
+      - ./monitoring/grafana/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
       - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
     ports:
       - "3000:3000"

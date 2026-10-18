@@ -1,3 +1,5 @@
+import type { MarketState } from './market-state.js';
+
 export interface TickData {
   symbol: string;
   category: string;
@@ -8,4 +10,5 @@ export interface TickData {
   volume?: number;
   collectedAt?: number;   // Worker가 외부 API 응답을 받은 시각 (ms)
   producedAt?: number;    // Worker가 Kafka로 전송한 시각 (ms)
+  marketState?: MarketState; // 소스의 장 상태 (T-56). 화면의 "장중 / 휴장" 표시에 쓴다
 }

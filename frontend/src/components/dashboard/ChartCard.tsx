@@ -4,8 +4,9 @@ import { AreaChart, Area, ResponsiveContainer, YAxis, Tooltip, XAxis, CartesianG
 import { TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatAxisNumber, formatClock, formatDate, formatNumber } from '@/lib/format'
-import { isMarketOpen, type MarketId } from '@/lib/marketHours'
-import { useMarketData, type ChartPoint, type ChartStatus } from '@/hooks/useMarketData'
+import { isMarketOpen, marketBadge, type MarketId, type MarketState } from '@/lib/marketHours'
+import { useMarketData, type ChartStatus } from '@/hooks/useMarketData'
+import { periodDirection, type Direction } from '@/lib/chartPoints'
 import type { ChartCardConfig } from '@/constants/data'
 
 const TIME_RANGES = ['실시간', '1일', '1주', '1개월', '3개월', '1년']
@@ -62,19 +63,17 @@ function Freshness({ timestamp }: { timestamp: number }) {
 
 const badgeClass = 'inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-[10px] font-medium leading-4'
 
-// 장 상태 (T-42). 1분마다 다시 판단한다. 공휴일은 반영하지 않는다.
-function MarketBadge({ market }: { market: MarketId }) {
+// 장 상태 (T-42). 시간표는 1분마다 다시 판단하고, 공휴일은 tick의 소스 장 상태로 판단한다 (T-56).
+function MarketBadge({ market, state }: { market: MarketId; state: MarketState | undefined }) {
   const now = useNow(60_000)
-  const open = isMarketOpen(market, new Date(now))
+  const { label, open } = marketBadge(isMarketOpen(market, new Date(now)), state)
   return (
     <span className={cn(badgeClass, open ? 'border-fg/30 text-fg' : 'border-line text-fg-muted')}>
       <span className={cn('h-1.5 w-1.5 rounded-full', open ? 'bg-fg' : 'bg-fg-muted/50')} />
-      {open ? '장중' : '장 마감'}
+      {label}
     </span>
   )
 }
-
-type Direction = 'up' | 'down' | 'flat'
 
 // 등락 색은 미국식(상승 초록, 하락 빨강, D-32). 등락 0은 중립 (T-43)
 const DIRECTION_STYLE: Record<Direction, string> = {
@@ -84,16 +83,8 @@ const DIRECTION_STYLE: Record<Direction, string> = {
 }
 const DIRECTION_ICON = { up: TrendingUp, down: TrendingDown, flat: Minus }
 
-// 그래프 선·채우기 색 (D-37): 상승 초록, 하락 빨강, 변화 없음은 본문색
+// 그래프 선·채우기 색 (D-37): 상승 초록, 하락 빨강, 변화 없음은 본문색. 기간 방향은 lib/chartPoints.ts
 const CHART_COLOR: Record<Direction, string> = { up: 'text-up', down: 'text-down', flat: 'text-fg' }
-
-// 그래프에 보이는 기간의 방향: 첫 값 대비 마지막 값
-function periodDirection(points: ChartPoint[]): Direction | null {
-  const first = points[0]
-  const last = points[points.length - 1]
-  if (!first || !last || points.length < 2) return null
-  return last.value > first.value ? 'up' : last.value < first.value ? 'down' : 'flat'
-}
 
 export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, market, delayMinutes }: ChartCardConfig) {
   const [activeRange, setActiveRange] = useState('실시간')
@@ -121,7 +112,7 @@ export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, mark
           <div className="min-w-0">
             <div className="mb-1 flex flex-wrap items-center gap-1.5">
               <h3 className="text-[13px] font-medium text-fg-muted">{title}</h3>
-              {ready && market && <MarketBadge market={market} />}
+              {ready && market && <MarketBadge market={market} state={latest?.marketState} />}
               {ready && delayMinutes && (
                 <span className={cn(badgeClass, 'border-line text-fg-muted')} title={`소스가 약 ${delayMinutes}분 늦은 시세를 제공합니다`}>
                   지연 {delayMinutes}분

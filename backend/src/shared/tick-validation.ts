@@ -1,4 +1,5 @@
 import type { TickData } from './types.js';
+import { isMarketState } from './market-state.js';
 
 // Kafka 메시지 검증 (docs/Task_ORDER.md T-13, SEC-002)
 // Gateway와 DB Sink가 같은 함수를 쓴다. 검증에 실패한 메시지는 예외를 던지지 않고 사유를 돌려준다.
@@ -24,7 +25,7 @@ export function parseTick(value: Buffer | null): TickParseResult {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return fail('not_object');
 
   const record = data as Record<string, unknown>;
-  const { symbol, category, price, changeRate, timestamp, changePrice, volume, collectedAt, producedAt } = record;
+  const { symbol, category, price, changeRate, timestamp, changePrice, volume, collectedAt, producedAt, marketState } = record;
 
   if (typeof symbol !== 'string' || !SYMBOL_PATTERN.test(symbol)) return fail('symbol');
   if (typeof category !== 'string' || !CATEGORIES.has(category)) return fail('category');
@@ -36,6 +37,8 @@ export function parseTick(value: Buffer | null): TickParseResult {
   if (volume !== undefined && !isFiniteNumber(volume)) return fail('volume');
   if (collectedAt !== undefined && !isPositiveNumber(collectedAt)) return fail('collected_at');
   if (producedAt !== undefined && !isPositiveNumber(producedAt)) return fail('produced_at');
+  // 장 상태는 정해진 값만 받는다 (T-56). 임의 문자열이 브라우저까지 전달되지 않게 한다.
+  if (marketState !== undefined && !isMarketState(marketState)) return fail('market_state');
 
   // 선택 필드는 위에서 "없거나 유한한 숫자"임을 확인했으므로 number로 다룬다.
   const tick: TickData = { symbol, category, price, changeRate, timestamp };
@@ -43,5 +46,6 @@ export function parseTick(value: Buffer | null): TickParseResult {
   if (volume !== undefined) tick.volume = volume as number;
   if (collectedAt !== undefined) tick.collectedAt = collectedAt as number;
   if (producedAt !== undefined) tick.producedAt = producedAt as number;
+  if (isMarketState(marketState)) tick.marketState = marketState;
   return { ok: true, tick };
 }

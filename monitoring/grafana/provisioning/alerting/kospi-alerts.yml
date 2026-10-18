@@ -1,0 +1,192 @@
+# Grafana 알림 규칙 자동 등록 (docs/Task_ORDER.md T-46)
+# 알림 수신처(메일·Slack 등)는 만들지 않는다. 외부 전송 대상과 비밀값이 생기기 때문이다.
+# 상태는 Grafana의 Alerting → Alert rules 화면에서 확인한다. 기본 수신처(이메일)는 SMTP가 없어서 실제로 보내지 않는다.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: kospi-pipeline
+    folder: KOSPI
+    interval: 1m
+    rules:
+      # Kafka 컨슈머가 밀리고 있음 (실시간 전송 또는 DB 적재가 따라가지 못함)
+      - uid: kospi-consumer-lag
+        title: Kafka 컨슈머 지연
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum by (consumergroup) (kafka_consumergroup_lag{topic="market-ticks"})
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [100] }
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "컨슈머 그룹 {{ $labels.consumergroup }}의 지연이 100건을 넘었습니다."
+
+      # Yahoo 수집이 계속 실패함 (T-04 백오프 상태)
+      - uid: kospi-yahoo-fetch-failing
+        title: Yahoo 수집 실패
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(increase(kospi_worker_fetch_total{source="yahoo",result=~"error|timeout|empty"}[5m])) or vector(0)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "최근 5분 동안 Yahoo 수집 실패가 계속되고 있습니다."
+
+      # 잘못된 메시지가 DLQ로 들어옴 (T-13, SEC-002)
+      - uid: kospi-dlq-messages
+        title: 잘못된 메시지(DLQ) 발생
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: (sum(increase(kospi_gateway_invalid_messages_total[10m])) or vector(0)) + (sum(increase(kospi_sink_invalid_messages_total[10m])) or vector(0))
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "최근 10분 동안 잘못된 메시지가 DLQ(market-ticks.dlq)로 보내졌습니다."
+
+      # Gateway가 Kafka에 연결되어 있지 않음 (실시간 전송 중단, T-14)
+      - uid: kospi-gateway-kafka-disconnected
+        title: Gateway Kafka 연결 끊김
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: min(kospi_gateway_kafka_connected)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        for: 2m
+        noDataState: Alerting
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: "Gateway의 Kafka 컨슈머가 2분 넘게 연결되어 있지 않습니다. 실시간 전송이 멈춘 상태입니다."
+
+      # 수집 대상(worker, backend, db-sink, kafka-exporter)이 응답하지 않음
+      - uid: kospi-target-down
+        title: 서비스 응답 없음
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: min by (job) (up)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }}이(가) 2분 넘게 응답하지 않습니다."
+
+      # 원본 보관 작업이 제때 성공하지 못함 (T-48, D-02: 목표 3시간, 작업 주기 1시간)
+      # 원본 최고령 나이로 판단하지 않는 이유: 장이 닫힌 시간에 worker가 다시 시작하면 오래된 시각의 마지막 tick이
+      # 다시 저장되어, 보관 작업이 정상이어도 다음 실행 전까지 값이 커진다 (B-22).
+      - uid: kospi-raw-retention
+        title: 원본 보관 작업 지연
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(kospi_db_job_last_success_age_seconds{job="retention:market_ticks"})
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [7200] }
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "원본(market_ticks) 보관 작업이 2시간 넘게 성공하지 못했습니다(주기 1시간). 원본이 3시간보다 오래 남을 수 있습니다."

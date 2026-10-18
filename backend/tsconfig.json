@@ -40,5 +40,7 @@
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true,
-  }
+  },
+  // 빌드 대상은 src만. 테스트(test/)는 빌드 결과물(dist)에 넣지 않고 tsx로 바로 실행한다 (docs/Task_ORDER.md T-45)
+  "include": ["src"]
 }

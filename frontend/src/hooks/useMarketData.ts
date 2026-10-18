@@ -1,15 +1,12 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { getConnectionStatus, getLastReceivedAt, subscribeStatus, subscribeTicks, type TickData } from '@/lib/marketSocket'
+import { appendPoint, mergePoints, type ChartPoint } from '@/lib/chartPoints'
+
+export type { ChartPoint }
 
 // 실시간 연결 상태와 마지막 데이터 수신 시각 (T-33). 공유 소켓 1개의 상태다.
 export const useConnectionStatus = () => useSyncExternalStore(subscribeStatus, getConnectionStatus)
 export const useLastReceivedAt = () => useSyncExternalStore(subscribeStatus, getLastReceivedAt)
-
-// 차트의 점 하나 (시각 ms, 값)
-export interface ChartPoint {
-  time: number
-  value: number
-}
 
 // loading: 불러오는 중, loaded: 응답을 받음(데이터가 0개일 수 있음), not_ready: 수집 보류 중인 지표(R-04), error: 요청 실패
 export type ChartStatus = 'loading' | 'loaded' | 'not_ready' | 'error'
@@ -19,22 +16,6 @@ const HISTORY_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v
 const RECENT_URL = HISTORY_URL.replace(/history$/, 'recent')
 
 const REALTIME = '실시간'
-const MAX_REALTIME_POINTS = 50
-
-// 시각 순서를 지키며 점을 추가한다. 같은 시각이면 값만 바꾸고, 더 이른 시각은 버린다.
-function appendPoint(points: ChartPoint[], point: ChartPoint) {
-  const last = points[points.length - 1]
-  if (last && point.time < last.time) return points
-  if (last && point.time === last.time) return [...points.slice(0, -1), point]
-  return [...points, point].slice(-MAX_REALTIME_POINTS)
-}
-
-// 최근 tick 응답과, 응답보다 먼저 도착한 실시간 tick을 합친다 (같은 시각은 실시간 값 우선).
-function mergePoints(fetched: ChartPoint[], live: ChartPoint[]) {
-  const byTime = new Map<number, ChartPoint>()
-  for (const point of [...fetched, ...live]) byTime.set(point.time, point)
-  return [...byTime.values()].sort((a, b) => a.time - b.time).slice(-MAX_REALTIME_POINTS)
-}
 
 // 심볼의 최신 tick만 받는다 (Header의 현재가 등). 공유 소켓을 쓰므로 연결이 늘지 않는다 (T-24).
 export function useLatestTick(symbol: string, enabled = true) {

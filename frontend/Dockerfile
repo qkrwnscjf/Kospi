@@ -9,6 +9,8 @@ RUN npm install
 
 COPY . .
 RUN npm run build
+# 테스트가 실패하면 이미지가 만들어지지 않는다 (docs/Task_ORDER.md T-45). Node 22 내장 node:test와 타입 제거 실행, 새 의존성 없음
+RUN npm test
 
 # Stage 2: Serve with Nginx
 FROM nginx:alpine

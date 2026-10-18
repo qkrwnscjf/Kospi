@@ -5,7 +5,7 @@
   "tags": ["kospi", "pipeline"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": false,
   "refresh": "10s",
   "time": { "from": "now-30m", "to": "now" },
@@ -85,12 +85,13 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Kafka 컨슈머 지연 · 토픽 유입 속도 (M-07)",
+      "title": "Kafka 컨슈머 지연(그룹별) · 토픽 유입 속도 (M-07)",
+      "description": "market-group은 실시간 전송(Gateway), db-sink는 DB 적재입니다 (T-12).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "targets": [
-        { "refId": "A", "legendFormat": "lag (market-group)", "expr": "sum(kafka_consumergroup_lag{consumergroup=\"market-group\"})" },
+        { "refId": "A", "legendFormat": "lag ({{consumergroup}})", "expr": "sum by (consumergroup) (kafka_consumergroup_lag{topic=\"market-ticks\"})" },
         { "refId": "B", "legendFormat": "유입 (msg/s)", "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"market-ticks\"}[1m]))" }
       ]
     },
@@ -138,6 +139,145 @@
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
       "targets": [
         { "refId": "A", "legendFormat": "unmapped", "expr": "sum(increase(kospi_worker_unmapped_symbol_total[1h])) or vector(0)" }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "DB 적재 (DB Sink, 초당)",
+      "description": "중복은 유니크 제약이 건너뛴 행(T-15), 잘못된 메시지는 DLQ로 보낸 메시지입니다(T-13).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 37, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "저장한 행", "expr": "sum(rate(kospi_sink_rows_inserted_total[5m]))" },
+        { "refId": "B", "legendFormat": "중복으로 건너뜀", "expr": "sum(rate(kospi_sink_duplicates_skipped_total[5m])) or vector(0)" },
+        { "refId": "C", "legendFormat": "잘못된 메시지 → DLQ", "expr": "sum(rate(kospi_sink_invalid_messages_total[5m])) or vector(0)" }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "History · 최근 tick API 응답 시간 p95 (M-11)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 37, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "history ({{result}})", "expr": "histogram_quantile(0.95, sum by (le, result) (rate(kospi_history_request_duration_seconds_bucket[5m])))" },
+        { "refId": "B", "legendFormat": "recent ({{result}})", "expr": "histogram_quantile(0.95, sum by (le, result) (rate(kospi_history_recent_duration_seconds_bucket[5m])))" }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "DB 용량 (원본 · 집계, B-07 · B-19)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 45, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{relation}}", "expr": "kospi_db_size_bytes" }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "보관·갱신 작업 마지막 성공 후 경과 · 원본 최고령 (T-48)",
+      "description": "원본(market_ticks)의 목표 보관 시간은 3시간이고 보관 작업은 1시간마다 실행됩니다(D-02, T-48). 장이 닫힌 시간에 worker가 다시 시작하면 마지막 tick이 다시 저장되어, 다음 보관 작업 전까지 원본 최고령이 일시적으로 커질 수 있습니다.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 45, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{job}}", "expr": "kospi_db_job_last_success_age_seconds" },
+        { "refId": "B", "legendFormat": "원본 최고령", "expr": "kospi_db_raw_oldest_age_seconds" }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Gateway 내부 지연 (Kafka 수신 → emit, T-23)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 53, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.5, sum by (le) (rate(kospi_gateway_emit_delay_seconds_bucket[2m])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(kospi_gateway_emit_delay_seconds_bucket[2m])))" }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Redis 저장 건너뜀 (최근 1시간)",
+      "description": "Redis가 연결되어 있지 않아 최신값 캐시를 건너뛴 횟수입니다. 실시간 전송은 계속됩니다 (T-23).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 53, "w": 6, "h": 4 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "skipped", "expr": "sum(increase(kospi_gateway_redis_skipped_total[1h])) or vector(0)" }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "잘못된 메시지 → DLQ (최근 1시간)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 18, "y": 53, "w": 6, "h": 4 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "invalid", "expr": "(sum(increase(kospi_gateway_invalid_messages_total[1h])) or vector(0)) + (sum(increase(kospi_sink_invalid_messages_total[1h])) or vector(0))" }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "구독 요청 거부 (최근 1시간, SEC-005)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 57, "w": 6, "h": 4 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "rejected", "expr": "sum(increase(kospi_gateway_subscribe_rejected_total[1h])) or vector(0)" }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "Gateway Kafka 연결",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 18, "y": 57, "w": 6, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{ "type": "value", "options": { "0": { "text": "끊김" }, "1": { "text": "연결" } } }]
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "legendFormat": "connected", "expr": "min(kospi_gateway_kafka_connected)" }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "수집 대상 상태 (Prometheus up)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 61, "w": 12, "h": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } }]
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{job}}", "expr": "up" }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "청크 수 (원본 · 집계, T-31)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 61, "w": 12, "h": 5 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{relation}}", "expr": "kospi_db_chunks" }
       ]
     }
   ]

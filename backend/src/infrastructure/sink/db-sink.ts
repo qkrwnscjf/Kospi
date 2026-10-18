@@ -27,6 +27,11 @@ const duplicatesSkippedTotal = new Counter('kospi_sink_duplicates_skipped_total'
 // DB 용량 (BENCHMARK B-07)
 const dbSizeBytes = new Gauge('kospi_db_size_bytes', 'Size of the raw hypertable and each continuous aggregate in bytes');
 const dbChunks = new Gauge('kospi_db_chunks', 'Number of chunks of the raw hypertable and each continuous aggregate (T-31)');
+// 보관·갱신 작업 상태 (docs/Task_ORDER.md T-48). 원본이 3시간보다 오래 남는 원인을 확인하기 위함 (B-21 관찰)
+const dbJobSchedule = new Gauge('kospi_db_job_schedule_seconds', 'Schedule interval of TimescaleDB retention / refresh jobs');
+const dbJobLastSuccessAge = new Gauge('kospi_db_job_last_success_age_seconds', 'Seconds since the last successful run of each TimescaleDB job');
+const dbJobFailures = new Gauge('kospi_db_job_failures', 'Total failures of each TimescaleDB job');
+const dbRawOldestAge = new Gauge('kospi_db_raw_oldest_age_seconds', 'Age of the oldest row in market_ticks (raw retention target: 3h, D-02)');
 const DB_SIZE_INTERVAL_MS = 5 * 60 * 1000;
 
 // 여러 행을 INSERT 한 번으로 저장한다 (P-16). 단일 문장이라 전부 들어가거나 전부 실패한다.
@@ -46,7 +51,7 @@ async function insertBatch(ticks: TickData[]) {
   return result.rowCount ?? 0;
 }
 
-// 원본과 집계의 용량을 기록한다 (B-07). 조회 실패는 수집에 영향을 주지 않도록 로그만 남긴다.
+// 원본과 집계의 용량, 청크 수, 보관·갱신 작업 상태를 기록한다 (B-07, T-31, T-48). 조회 실패는 수집에 영향을 주지 않도록 로그만 남긴다.
 async function recordDbSize() {
   try {
     const { rows } = await dbPool.query<{ relation: string; bytes: string }>(`
@@ -74,6 +79,33 @@ async function recordDbSize() {
     for (const row of chunks.rows) {
       dbChunks.set({ relation: row.relation }, Number(row.chunks));
     }
+
+    // 보관(retention)과 집계 갱신(refresh) 작업 (T-48). 집계 작업은 저장 테이블 대신 집계 이름으로 표시한다.
+    const jobs = await dbPool.query<{ job: string; schedule_s: number; last_success_age_s: number | null; failures: number | null }>(`
+      SELECT replace(j.proc_name, 'policy_', '') || ':' || COALESCE(ca.view_name::text, j.hypertable_name::text) AS job,
+             extract(epoch FROM j.schedule_interval)::float8 AS schedule_s,
+             extract(epoch FROM now() - s.last_successful_finish)::float8 AS last_success_age_s,
+             s.total_failures::float8 AS failures
+      FROM timescaledb_information.jobs j
+      LEFT JOIN timescaledb_information.job_stats s ON s.job_id = j.job_id
+      LEFT JOIN timescaledb_information.continuous_aggregates ca
+        ON ca.materialization_hypertable_schema = j.hypertable_schema
+       AND ca.materialization_hypertable_name = j.hypertable_name
+      WHERE j.proc_name IN ('policy_retention', 'policy_refresh_continuous_aggregate')
+    `);
+    for (const row of jobs.rows) {
+      dbJobSchedule.set({ job: row.job }, row.schedule_s);
+      if (row.last_success_age_s !== null) dbJobLastSuccessAge.set({ job: row.job }, Math.round(row.last_success_age_s));
+      if (row.failures !== null) dbJobFailures.set({ job: row.job }, row.failures);
+    }
+
+    const oldest = await dbPool.query<{ age_s: number | null }>(
+      `SELECT extract(epoch FROM now() - min(time))::float8 AS age_s FROM market_ticks`
+    );
+    // 원본이 비어 있으면 0으로 기록한다 (값을 건너뛰면 이전 값이 남아 오래된 것처럼 보임).
+    // 주의: worker가 다시 시작하면 지표마다 마지막 tick을 한 번 다시 보낸다. 장이 닫힌 시간에는 그 시각이 오래전이라
+    // 다음 보관 작업(1시간 주기)까지 이 값이 커질 수 있다 (B-22).
+    dbRawOldestAge.set({}, Math.round(oldest.rows[0]?.age_s ?? 0));
   } catch (error) {
     console.error(`DB size check failed: ${error instanceof Error ? error.message : String(error)}`);
   }

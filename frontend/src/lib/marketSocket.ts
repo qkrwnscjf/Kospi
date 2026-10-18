@@ -1,4 +1,5 @@
 import { io, Socket } from 'socket.io-client'
+import type { MarketState } from '@/lib/marketHours'
 
 // 앱 전체가 함께 쓰는 WebSocket 연결 1개 (docs/Task_ORDER.md T-24, P-12)
 // 이전에는 차트 카드마다 소켓을 따로 열어서, 브라우저 1개가 카드 수만큼 연결을 만들었다.
@@ -12,6 +13,7 @@ export interface TickData {
   changePrice?: number
   timestamp: number // 소스 기준 시각 (ms)
   volume?: number
+  marketState?: MarketState // 소스의 장 상태 (T-56)
 }
 
 type TickListener = (tick: TickData) => void

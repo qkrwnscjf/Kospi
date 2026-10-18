@@ -1,9 +1,27 @@
 // 시장별 정규 거래 시간 — 화면 표시용 (docs/Task_ORDER.md T-42, D-36)
 // backend/src/infrastructure/ingestion/market-hours.ts와 같은 규칙이다. 규칙을 바꾸면 두 파일을 함께 고친다.
 // 서버에 묻지 않고 브라우저의 Intl로 판단해서, 장 상태를 보여 주려고 요청이 늘지 않는다.
-// 공휴일은 반영하지 않는다(공휴일에도 "장중"으로 보일 수 있음).
+// 공휴일은 시간표로 알 수 없어서, tick에 담겨 오는 소스 장 상태(marketState)와 함께 판단한다 (marketBadge, T-56).
 
 export type MarketId = 'krx' | 'us_equity' | 'global_24h'
+
+// 소스(Yahoo)의 장 상태 (backend/src/shared/market-state.ts와 같은 값)
+export type MarketState = 'PREPRE' | 'PRE' | 'REGULAR' | 'POST' | 'POSTPOST' | 'CLOSED'
+
+export type MarketBadgeLabel = '장중' | '휴장' | '장 시작 전' | '장 마감'
+
+// 카드의 장 상태 배지 (T-42, T-56). backend의 decideMarketStatus와 같은 규칙에 화면용 구분을 더했다.
+// - 장 시간 밖: 장 마감
+// - 장 시간 + 소스 REGULAR 또는 소스 정보 없음: 장중
+// - 장 시간 + 소스 CLOSED: 휴장(공휴일 등)
+// - 장 시간 + 소스 PRE / POST: 장 시작 전 / 장 마감(조기 폐장 등)
+export function marketBadge(timeOpen: boolean, state: MarketState | undefined): { label: MarketBadgeLabel; open: boolean } {
+  if (!timeOpen) return { label: '장 마감', open: false }
+  if (state === undefined || state === 'REGULAR') return { label: '장중', open: true }
+  if (state === 'CLOSED') return { label: '휴장', open: false }
+  if (state === 'PRE' || state === 'PREPRE') return { label: '장 시작 전', open: false }
+  return { label: '장 마감', open: false }
+}
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const formatters = new Map<string, Intl.DateTimeFormat>()

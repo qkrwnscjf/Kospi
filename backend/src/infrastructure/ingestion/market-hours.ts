@@ -1,8 +1,39 @@
 // 시장별 정규 거래 시간 판단 (docs/Task_ORDER.md T-07, D-16)
 // 시간대 변환은 Node 내장 Intl을 쓰므로 미국 서머타임도 자동으로 반영된다.
-// 공휴일은 반영하지 않는다 (열려 있다고 판단해서 활성 주기로 수집한다).
+// 공휴일은 시간표로 알 수 없어서, 소스(Yahoo)의 장 상태와 함께 판단한다 (decideMarketStatus, T-56, D-40).
+
+import type { YahooSymbolKey } from '../../shared/symbols.js';
+import type { MarketState } from '../../shared/market-state.js';
 
 export type MarketId = 'krx' | 'us_equity' | 'global_24h';
+
+// 지표별로 따르는 시장 (frontend/src/constants/data.ts의 market과 같다)
+export const YAHOO_MARKET: Record<YahooSymbolKey, MarketId> = {
+  KOSPI: 'krx',
+  KOSDAQ: 'krx',
+  SP500: 'us_equity',
+  NASDAQ: 'us_equity',
+  SOX: 'us_equity',
+  US10Y: 'us_equity',
+  'USD/KRW': 'global_24h',
+  DXY: 'global_24h',
+  WTI: 'global_24h',
+  COPPER: 'global_24h',
+};
+
+// open: 장중, holiday: 시간표상 장 시간인데 소스가 닫혀 있음(공휴일 등), closed: 장 시간 밖
+export type MarketStatus = 'open' | 'holiday' | 'closed';
+
+// 시간표와 소스 장 상태를 합쳐 판단한다 (T-56, D-40).
+// - 장 시간 밖이면 소스와 상관없이 closed
+// - 장 시간인데 그 시장의 지표 중 하나라도 REGULAR이거나, 소스 장 상태를 하나도 모르면 open (이전 동작과 같음)
+// - 장 시간인데 소스가 모두 REGULAR가 아니면 holiday
+export function decideMarketStatus(timeOpen: boolean, sourceStates: (MarketState | undefined)[]): MarketStatus {
+  if (!timeOpen) return 'closed';
+  const known = sourceStates.filter((state): state is MarketState => state !== undefined);
+  if (known.length === 0 || known.includes('REGULAR')) return 'open';
+  return 'holiday';
+}
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 

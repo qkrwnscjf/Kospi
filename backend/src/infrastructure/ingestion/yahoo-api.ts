@@ -3,6 +3,7 @@ import type { NormalizedMarketData } from './normalizer.js';
 import { Counter } from '../metrics.js';
 import { YAHOO_SYMBOLS, YAHOO_CATEGORY as CATEGORY_BY_KEY, YAHOO_KEYS } from '../../shared/symbols.js';
 import type { YahooSymbolKey } from '../../shared/symbols.js';
+import { isMarketState } from '../../shared/market-state.js';
 
 const yahooFinance = new YahooFinance();
 
@@ -19,6 +20,8 @@ const KEY_BY_YAHOO_SYMBOL = new Map<string, YahooSymbolKey>(
 const symbolAliasTotal = new Counter('kospi_worker_symbol_alias_total', 'Yahoo responses whose symbol was an alias, by internal symbol');
 const unmappedSymbolTotal = new Counter('kospi_worker_unmapped_symbol_total', 'Yahoo quotes dropped because the symbol could not be mapped');
 const invalidQuoteTotal = new Counter('kospi_worker_invalid_quote_total', 'Yahoo quotes dropped by validation, by symbol and reason');
+// 장 상태 값이 없거나 알 수 없는 값이면 그 지표는 시간표로만 판단한다 (T-56)
+const missingMarketStateTotal = new Counter('kospi_worker_missing_market_state_total', 'Yahoo quotes without a known marketState, by symbol');
 
 const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
@@ -79,6 +82,11 @@ export async function fetchYahooData(): Promise<NormalizedMarketData[]> {
       continue;
     }
 
+    const marketState: unknown = quote.marketState;
+    if (!isMarketState(marketState)) {
+      missingMarketStateTotal.inc({ symbol: key });
+    }
+
     results.push({
       ticker: key,
       category: CATEGORY_BY_KEY[key],
@@ -87,6 +95,7 @@ export async function fetchYahooData(): Promise<NormalizedMarketData[]> {
       changePrice: validated.changePrice,
       timestamp: validated.time.getTime(),
       ...(isFiniteNumber(quote.regularMarketVolume) ? { volume: quote.regularMarketVolume } : {}),
+      ...(isMarketState(marketState) ? { marketState } : {}),
     });
   }
 

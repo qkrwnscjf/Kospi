@@ -172,6 +172,17 @@ const MIGRATIONS: Migration[] = [
       `SELECT add_retention_policy('market_1d', drop_after => INTERVAL '1 year', if_not_exists => true)`,
     ],
   },
+  {
+    version: 4,
+    name: 'T-48 run raw retention every hour (was 1 day)',
+    statements: [
+      // T-48 (BENCHMARK B-22): 원본 보관 작업의 기본 주기가 1일이라, 원본이 목표(3시간)보다 최대 하루 넘게 남았다(실측 약 25시간).
+      // 주기를 1시간으로 줄이고 바로 한 번 실행되게 한다. 데이터를 지우는 기준(3시간)은 그대로이고, 집계 보관(1년)은 1일 주기 그대로다.
+      `SELECT alter_job(job_id, schedule_interval => INTERVAL '1 hour', next_start => now())
+       FROM timescaledb_information.jobs
+       WHERE proc_name = 'policy_retention' AND hypertable_name = 'market_ticks'`,
+    ],
+  },
 ];
 
 // 집계의 실제 저장 테이블(materialization hypertable)을 찾아 청크 간격을 바꾼다 (T-31).
