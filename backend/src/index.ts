@@ -4,6 +4,8 @@ import fastifyCors from '@fastify/cors';
 import fastifySocketIO from 'fastify-socket.io';
 import { initMarketGateway, stopMarketGateway } from './domains/market/market.gateway.js';
 import { historyController, startHistorySelfCheck } from './domains/history/history.controller.js';
+import { flowsController } from './domains/flows/flows.controller.js';
+import { disclosuresController } from './domains/disclosures/disclosures.controller.js';
 import { dbPool, initDB } from './infrastructure/db.js';
 import { redis } from './infrastructure/redis.js';
 import { metricsConfig, startMetricsLog, startMetricsServer } from './infrastructure/metrics.js';
@@ -27,6 +29,8 @@ fastify.register(fastifySocketIO as any, {
 
 // Register REST Controllers
 fastify.register(historyController);
+fastify.register(flowsController);
+fastify.register(disclosuresController);
 
 // Health check
 fastify.get('/api/health', async (request, reply) => {

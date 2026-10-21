@@ -4,6 +4,7 @@ import { dbPool } from '../../infrastructure/db.js';
 import { Latency } from '../../infrastructure/metrics.js';
 import { isSubscribableSymbol, isYahooSymbolKey } from '../../shared/symbols.js';
 import type { YahooSymbolKey } from '../../shared/symbols.js';
+import { isKrxDailySymbol, type KrxDailySymbol } from '../../shared/krx-indices.js';
 
 // 측정 지표 (docs/Task_ORDER.md T-01, BENCHMARK M-11)
 const historyDuration = new Latency('kospi_history_request_duration_seconds', 'History API response time by result (cache_hit / cache_miss / not_ready / error)');
@@ -44,6 +45,19 @@ async function getHistory(ticker: YahooSymbolKey, timeframe: Timeframe): Promise
      FROM ${view}
      WHERE symbol = $1 AND bucket >= now() - $2::interval
      ORDER BY bucket`,
+    [ticker, range]
+  );
+  return rows;
+}
+
+// KRX 일별 지수 (T-67): 하루 1개 값이라 1주 ~ 1년만 제공한다. "1일"은 일별 시세로 그릴 수 없어서 daily_only로 알린다.
+async function getDailyIndexHistory(ticker: KrxDailySymbol, timeframe: Timeframe): Promise<HistoryPoint[]> {
+  const { range } = DB_TIMEFRAMES[timeframe];
+  const { rows } = await dbPool.query<HistoryPoint>(
+    `SELECT (extract(epoch FROM time) * 1000)::float8 AS time, close::float8 AS value
+     FROM index_daily
+     WHERE symbol = $1 AND time >= now() - $2::interval
+     ORDER BY time`,
     [ticker, range]
   );
   return rows;
@@ -103,8 +117,14 @@ export const historyController = async (fastify: FastifyInstance) => {
       return reply.code(400).send({ error: 'ticker and a valid timeframe are required' });
     }
 
-    // Yahoo 심볼이 없는 Naver 6종은 수집이 보류 중이라(R-03) mock 대신 "준비 중"을 돌려준다 (R-04, T-20)
-    if (!isYahooSymbolKey(ticker)) {
+    // KRX 일별 지수(VKOSPI·섹터 5종, T-67)는 index_daily에서, "1일"은 일별 시세로 그릴 수 없어서 daily_only
+    const daily = isKrxDailySymbol(ticker);
+    if (daily && timeframe === '1일') {
+      historyDuration.observe({ result: 'not_ready' }, Date.now() - startedAt);
+      return { ticker, timeframe, data: [], status: 'daily_only' };
+    }
+    // 그 밖에 Yahoo 심볼이 없는 지표는 mock 대신 "준비 중"을 돌려준다 (R-04, T-20)
+    if (!daily && !isYahooSymbolKey(ticker)) {
       historyDuration.observe({ result: 'not_ready' }, Date.now() - startedAt);
       return { ticker, timeframe, data: [], status: 'not_ready' };
     }
@@ -117,7 +137,7 @@ export const historyController = async (fastify: FastifyInstance) => {
         return JSON.parse(cached);
       }
 
-      const data = await getHistory(ticker, timeframe);
+      const data = daily ? await getDailyIndexHistory(ticker, timeframe) : await getHistory(ticker as YahooSymbolKey, timeframe);
       const responsePayload = { ticker, timeframe, data };
       await redis.set(cacheKey, JSON.stringify(responsePayload), 'EX', HISTORY_CACHE_TTL_S);
 

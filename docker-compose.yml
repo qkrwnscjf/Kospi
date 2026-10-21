@@ -141,6 +141,70 @@ services:
       backend:
         condition: service_healthy
 
+  # 증시 자금 흐름 수집기 (docs/Task_ORDER.md 11단계 A): KIS 시장별 투자자 순매수 → Kafka investor-flows
+  # 증권사 키를 가진 컨테이너는 이것 하나뿐이다 (D-43). 공개 포트 없음.
+  flows-collector:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kospi-flows-collector
+    restart: on-failure
+    command: ["node", "dist/infrastructure/flows/flows-collector.js"]
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - FLOWS_POLLING_INTERVAL_MS=30000
+      # 키는 프로젝트 루트의 .env(사용자가 직접 작성, git 제외)에서 변수 치환으로만 받는다 (D-43, D-51).
+      # 값이 없으면 KIS에 접속하지 않고 대기한다. KIS_ENV는 vps(모의투자, 기본) 또는 prod.
+      - KIS_APP_KEY=${KIS_APP_KEY:-}
+      - KIS_APP_SECRET=${KIS_APP_SECRET:-}
+      - KIS_ENV=${KIS_ENV:-vps}
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # KRX 일별 지수 수집기 (docs/Task_ORDER.md T-67): VKOSPI·KRX 섹터 5종 일별 종가 → Kafka index-daily
+  # KRX 키를 가진 컨테이너는 이것 하나뿐이다. 공개 포트 없음. 접속 대상은 코드에 고정된 data-dbg.krx.co.kr 하나(2026-10-20 승인).
+  krx-collector:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kospi-krx-collector
+    restart: on-failure
+    command: ["node", "dist/infrastructure/krx/krx-collector.js"]
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      # 키는 프로젝트 루트의 .env(사용자가 직접 작성, git 제외)에서 변수 치환으로만 받는다 (D-51). 값이 없으면 접속하지 않고 대기한다.
+      - KRX_API_KEY=${KRX_API_KEY:-}
+      # 이미 저장된 기간을 묻는 내부 주소 (SEC-014). Docker 내부 네트워크만 쓰고 키는 보내지 않는다.
+      - BACKEND_URL=http://backend:3001
+    # Gateway(backend)가 먼저 떠 있어야 과거 채우기 직후의 최신값이 화면 캐시에 들어간다
+    depends_on:
+      kafka:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  # DART 공시 수집기 (docs/Task_ORDER.md 12단계 T-74): 유가증권 공시 목록·자본 이벤트 금액 → Kafka disclosures
+  # DART 키를 가진 컨테이너는 이것 하나뿐이다. 공개 포트 없음. 접속 대상은 코드에 고정된 opendart.fss.or.kr 하나(2026-10-20 승인).
+  disclosure-collector:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kospi-disclosure-collector
+    restart: on-failure
+    command: ["node", "dist/infrastructure/disclosures/disclosure-collector.js"]
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      # 키는 프로젝트 루트의 .env에서 변수 치환으로만 받는다 (D-51). DART는 키를 요청 URL에 넣으므로 URL은 로그에 남기지 않는다 (D-59 ⑥).
+      - DART_API_KEY=${DART_API_KEY:-}
+      # 이미 저장된 기간을 묻는 내부 주소 (SEC-014). Docker 내부 네트워크만 쓰고 키는 보내지 않는다.
+      - BACKEND_URL=http://backend:3001
+    depends_on:
+      kafka:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
   # Frontend UI (Nginx)
   frontend:
     build:

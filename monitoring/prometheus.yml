@@ -19,3 +19,17 @@ scrape_configs:
   - job_name: 'db-sink'
     static_configs:
       - targets: ['db-sink:9464']
+
+  # 증시 자금 흐름 수집기 (docs/Task_ORDER.md 11단계 A). 내부 전용 포트.
+  - job_name: 'flows-collector'
+    static_configs:
+      - targets: ['flows-collector:9464']
+
+  # KRX 일별 지수 수집기(T-67)와 DART 공시 수집기(12단계). 내부 전용 포트.
+  - job_name: 'krx-collector'
+    static_configs:
+      - targets: ['krx-collector:9464']
+
+  - job_name: 'disclosure-collector'
+    static_configs:
+      - targets: ['disclosure-collector:9464']

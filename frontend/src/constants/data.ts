@@ -8,6 +8,7 @@ import type { MarketId } from '@/lib/marketHours'
 // - prefix / suffix: 단위
 // - market: 장 상태(장중 / 장 마감)를 판단할 시장 (lib/marketHours.ts)
 // - delayMinutes: 소스가 지연 시세를 주는 지표 (BENCHMARK B-02 실측: DXY·WTI·구리 약 10분, US10Y 약 15분)
+// - daily: 하루 1개 값(종가)만 있는 지표. KRX Open API 일별 시세 (T-67). 실시간·1일 그래프 없이 1주 ~ 1년만 보여 준다.
 
 export interface ChartCardConfig {
   title: string
@@ -18,13 +19,14 @@ export interface ChartCardConfig {
   suffix?: string
   market?: MarketId
   delayMinutes?: number
+  daily?: boolean
 }
 
 export const CATEGORY_DATA: Record<string, ChartCardConfig[]> = {
   category1: [
     { title: '코스피 지수', symbol: 'KOSPI', ready: true, decimals: 2, suffix: 'pt', market: 'krx' },
     { title: '코스닥 지수', symbol: 'KOSDAQ', ready: true, decimals: 2, suffix: 'pt', market: 'krx' },
-    { title: '코스피200 변동성지수', symbol: 'VKOSPI', ready: false, decimals: 2 },
+    { title: '코스피200 변동성지수', symbol: 'VKOSPI', ready: true, decimals: 2, daily: true },
   ],
   category2: [
     { title: '원/달러 환율', symbol: 'USD/KRW', ready: true, decimals: 2, suffix: '원', market: 'global_24h' },
@@ -39,10 +41,10 @@ export const CATEGORY_DATA: Record<string, ChartCardConfig[]> = {
     { title: '구리 선물', symbol: 'COPPER', ready: true, decimals: 4, prefix: '$', market: 'global_24h', delayMinutes: 10 },
   ],
   category4: [
-    { title: 'KRX 반도체', symbol: 'KRX_SEMI', ready: false, decimals: 2 },
-    { title: 'KRX 정보기술(IT)', symbol: 'KRX_IT', ready: false, decimals: 2 },
-    { title: 'KRX 자동차', symbol: 'KRX_AUTO', ready: false, decimals: 2 },
-    { title: 'KRX 은행', symbol: 'KRX_BANK', ready: false, decimals: 2 },
-    { title: 'KRX 헬스케어', symbol: 'KRX_BIO', ready: false, decimals: 2 },
+    { title: 'KRX 반도체', symbol: 'KRX_SEMI', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 정보기술(IT)', symbol: 'KRX_IT', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 자동차', symbol: 'KRX_AUTO', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 은행', symbol: 'KRX_BANK', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 헬스케어', symbol: 'KRX_BIO', ready: true, decimals: 2, suffix: 'pt', daily: true },
   ],
 }

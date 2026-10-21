@@ -183,6 +183,66 @@ const MIGRATIONS: Migration[] = [
        WHERE proc_name = 'policy_retention' AND hypertable_name = 'market_ticks'`,
     ],
   },
+  {
+    version: 5,
+    name: '11단계 A investor_flows (market net buy by investor type)',
+    statements: [
+      // 증시 자금 흐름 (docs/Task_ORDER.md 11단계 A, D-47, D-53). 기존 테이블은 건드리지 않는다.
+      // 시장별로 한 시점의 외국인·기관계·개인 순매수(백만원). 장중 잠정치는 분 단위, 확정치(B단계)는 같은 키를 덮어쓴다.
+      `CREATE TABLE IF NOT EXISTS investor_flows (
+        time TIMESTAMPTZ NOT NULL,
+        market TEXT NOT NULL,
+        foreign_net DOUBLE PRECISION NOT NULL,
+        institution_net DOUBLE PRECISION NOT NULL,
+        individual_net DOUBLE PRECISION NOT NULL,
+        status TEXT NOT NULL,
+        source TEXT NOT NULL
+      )`,
+      // 하루 수백 행 수준이라 청크는 7일
+      `SELECT create_hypertable('investor_flows', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS investor_flows_market_time_key ON investor_flows (market, time)`,
+      `SELECT add_retention_policy('investor_flows', drop_after => INTERVAL '1 year', if_not_exists => true)`,
+    ],
+  },
+  {
+    version: 6,
+    name: 'T-67 index_daily (KRX daily indices), 12단계 disclosures (DART)',
+    statements: [
+      // KRX 일별 지수 (docs/Task_ORDER.md T-67, D-60). 기존 테이블·집계는 건드리지 않는다.
+      // 하루 1개 값이라 원본(market_ticks, 3시간 보관)·집계와 섞지 않는다. 섞으면 지난 날짜 버킷을 다시 계산할 때
+      // 다른 지표의 원본이 이미 지워져 있어 집계가 망가질 수 있다(저장 불변 조건).
+      `CREATE TABLE IF NOT EXISTS index_daily (
+        time TIMESTAMPTZ NOT NULL,
+        symbol TEXT NOT NULL,
+        close DOUBLE PRECISION NOT NULL,
+        change_rate DOUBLE PRECISION NOT NULL,
+        change_price DOUBLE PRECISION,
+        source TEXT NOT NULL
+      )`,
+      `SELECT create_hypertable('index_daily', 'time', chunk_time_interval => INTERVAL '90 days', if_not_exists => TRUE)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS index_daily_symbol_time_key ON index_daily (symbol, time)`,
+      `SELECT add_retention_policy('index_daily', drop_after => INTERVAL '1 year', if_not_exists => true)`,
+      // DART 공시 (12단계 T-76, D-59). 개인 이름(제출인)은 저장하지 않는다. 금액이 없으면 NULL.
+      `CREATE TABLE IF NOT EXISTS disclosures (
+        rcept_date DATE NOT NULL,
+        rcept_no TEXT NOT NULL,
+        corp_code TEXT NOT NULL,
+        stock_code TEXT NOT NULL,
+        corp_name TEXT NOT NULL,
+        report_name TEXT NOT NULL,
+        event_group TEXT NOT NULL,
+        event_kind TEXT NOT NULL,
+        is_correction BOOLEAN NOT NULL,
+        amount DOUBLE PRECISION,
+        market TEXT NOT NULL,
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `SELECT create_hypertable('disclosures', 'rcept_date', chunk_time_interval => INTERVAL '30 days', if_not_exists => TRUE)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS disclosures_rcept_key ON disclosures (rcept_no, rcept_date)`,
+      `CREATE INDEX IF NOT EXISTS disclosures_group_date_idx ON disclosures (event_group, rcept_date DESC)`,
+      `SELECT add_retention_policy('disclosures', drop_after => INTERVAL '1 year', if_not_exists => true)`,
+    ],
+  },
 ];
 
 // 집계의 실제 저장 테이블(materialization hypertable)을 찾아 청크 간격을 바꾼다 (T-31).

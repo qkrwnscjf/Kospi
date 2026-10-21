@@ -10,6 +10,8 @@ import { periodDirection, type Direction } from '@/lib/chartPoints'
 import type { ChartCardConfig } from '@/constants/data'
 
 const TIME_RANGES = ['실시간', '1일', '1주', '1개월', '3개월', '1년']
+// 일별 시세 지표(T-67)는 하루 1개 값이라 실시간·1일 그래프가 없다
+const DAILY_RANGES = ['1주', '1개월', '3개월', '1년']
 
 // 데이터 신선도 표시 (docs/Task_ORDER.md T-27): 마지막 값의 소스 기준 시각이 지금으로부터 얼마나 지났는지.
 function formatAge(ms: number) {
@@ -86,8 +88,9 @@ const DIRECTION_ICON = { up: TrendingUp, down: TrendingDown, flat: Minus }
 // 그래프 선·채우기 색 (D-37): 상승 초록, 하락 빨강, 변화 없음은 본문색. 기간 방향은 lib/chartPoints.ts
 const CHART_COLOR: Record<Direction, string> = { up: 'text-up', down: 'text-down', flat: 'text-fg' }
 
-export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, market, delayMinutes }: ChartCardConfig) {
-  const [activeRange, setActiveRange] = useState('실시간')
+export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, market, delayMinutes, daily }: ChartCardConfig) {
+  const ranges = daily ? DAILY_RANGES : TIME_RANGES
+  const [activeRange, setActiveRange] = useState(daily ? '1개월' : '실시간')
   const { latest, chartData, status } = useMarketData(symbol, activeRange, ready)
 
   const direction: Direction | null = latest ? (latest.changeRate > 0 ? 'up' : latest.changeRate < 0 ? 'down' : 'flat') : null
@@ -105,7 +108,8 @@ export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, mark
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-      className="relative h-[340px] rounded-xl border border-line bg-surface transition-colors duration-200 hover:border-line-strong"
+      // 마우스를 올리면 테두리가 강조색으로 은은하게 빛난다 (T-69). 그래프 색은 등락 색 그대로다
+      className="card-neon relative h-[340px] rounded-xl border border-line bg-surface"
     >
       <div className="flex h-full flex-col p-5">
         <div className="mb-2 flex items-start justify-between gap-3">
@@ -116,6 +120,11 @@ export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, mark
               {ready && delayMinutes && (
                 <span className={cn(badgeClass, 'border-line text-fg-muted')} title={`소스가 약 ${delayMinutes}분 늦은 시세를 제공합니다`}>
                   지연 {delayMinutes}분
+                </span>
+              )}
+              {ready && daily && (
+                <span className={cn(badgeClass, 'border-line text-fg-muted')} title="KRX Open API 일별 시세입니다. 장 마감 후 하루 1번 갱신됩니다">
+                  일별 시세
                 </span>
               )}
             </div>
@@ -131,7 +140,8 @@ export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, mark
               )}
             </div>
             <div className="mt-0.5 h-4 text-[11px] text-fg-muted tabular-nums">
-              {latest && <Freshness timestamp={latest.timestamp} />}
+              {/* 일별 시세는 "n초 전" 대신 기준일을 보여 준다 */}
+              {latest && (daily ? <span>기준일 {formatDate(latest.timestamp, true)}</span> : <Freshness timestamp={latest.timestamp} />)}
             </div>
           </div>
           {latest && direction && DirectionIcon && (
@@ -145,7 +155,7 @@ export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, mark
 
         {/* Time Range Selector: 선택된 항목은 흑백 반전 (D-35) */}
         <div className="mb-3 flex gap-1" role="group" aria-label={`${title} 기간 선택`}>
-          {TIME_RANGES.map(range => (
+          {ranges.map(range => (
             <button
               key={range}
               type="button"

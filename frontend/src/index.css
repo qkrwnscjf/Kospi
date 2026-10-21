@@ -8,6 +8,8 @@
  * 값은 "R G B" 형식이라 Tailwind에서 투명도(bg-fg/10 등)를 붙일 수 있다.
  * 기본은 라이트이고, <html class="dark">이면 다크 값으로 바뀐다.
  * 상승·하락은 미국식(초록·빨강, D-32)이며, 각 배경에서 글자 대비 4.5:1 이상이 되도록 고른 값이다.
+ * neon은 은은한 강조 1색이다 (T-69, D-54). 선택된 메뉴·카드 마우스 오버 빛·포커스·배경 빛 번짐에만 쓰고,
+ * 데이터(그래프·등락)에는 쓰지 않는다. 상승 초록·하락 빨강과 헷갈리지 않도록 하늘색으로 골랐다.
  */
 @layer base {
   :root {
@@ -19,6 +21,8 @@
     --color-fg-muted: 115 115 115;    /* 보조 글자 */
     --color-up: 21 128 61;            /* 상승 */
     --color-down: 220 38 38;          /* 하락 */
+    --color-neon: 2 132 199;          /* 강조 (아이콘·테두리·빛에만, 글자에는 쓰지 않음) */
+    --glow-strength: 0.10;            /* 배경 빛 번짐 세기 */
     color-scheme: light;
   }
 
@@ -31,11 +35,45 @@
     --color-fg-muted: 163 163 163;
     --color-up: 74 222 128;
     --color-down: 248 113 113;
+    --color-neon: 56 189 248;
+    --glow-strength: 0.14;
     color-scheme: dark;
   }
 
   body {
-    @apply bg-page text-fg antialiased selection:bg-fg/15;
+    @apply bg-page text-fg antialiased selection:bg-neon/20;
+  }
+
+  /* 키보드 포커스는 강조색 테두리로 보여 준다 (T-69) */
+  :focus-visible {
+    outline: 2px solid rgb(var(--color-neon));
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* 카드에 마우스를 올리면 테두리가 강조색으로 은은하게 빛난다 (T-69). 움직이는 효과는 없다 */
+  .card-neon {
+    transition: border-color 200ms, box-shadow 200ms;
+  }
+  .card-neon:hover {
+    border-color: rgb(var(--color-neon) / 0.45);
+    box-shadow: 0 0 0 1px rgb(var(--color-neon) / 0.08), 0 12px 40px -18px rgb(var(--color-neon) / 0.6);
+  }
+
+  /* 배경의 정적인 빛 번짐 (T-69). 이전의 움직이는 blur 원(T-34에서 제거)과 달리 그라데이션 한 장이라 렌더링 부담이 없다 */
+  .ambient-glow {
+    background-image:
+      radial-gradient(42rem 30rem at 8% -6%, rgb(var(--color-neon) / var(--glow-strength)), transparent 70%),
+      radial-gradient(36rem 26rem at 100% 0%, rgb(var(--color-neon) / calc(var(--glow-strength) * 0.6)), transparent 70%);
+  }
+
+  /* 모바일 가로 스크롤 메뉴의 스크롤바 숨김 */
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
   }
 }
 

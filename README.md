@@ -44,17 +44,26 @@ worker ── 값 검증 · 심볼 정규화 · 바뀐 값만 전송 ──▶ K
 
    잘못된 메시지 ──▶ Kafka `market-ticks.dlq` (격리 후 처리 계속)
    지표 ──▶ Prometheus ──▶ Grafana (대시보드 · 알림 규칙 자동 등록)
+
+KRX Open API (일별 지수 6종) ──▶ krx-collector ──▶ Kafka `index-daily` ──┬─▶ Gateway (화면 최신값)
+DART OpenAPI (유가증권 공시)  ──▶ disclosure-collector ──▶ Kafka `disclosures` ─┤
+KIS Open API (투자자 순매수, 준비 중) ──▶ flows-collector ──▶ Kafka `investor-flows` ─┘─▶ db-sink ──▶ TimescaleDB
+   · 각 수집기는 자기 API 키만 가지며, 키가 없으면 외부에 접속하지 않고 대기합니다
+   · 시작할 때 backend에 이미 저장된 기간을 물어 빠진 기간만 채웁니다
 ```
 
 | 구성 요소 | 역할 |
 | :--- | :--- |
 | **worker** | Yahoo에서 10개 지표를 수집해 Kafka로 보냅니다. 요청 시간 제한, 실패 시 지수 백오프, 수집이 겹치지 않는 고정 주기 실행, 장 시간·휴장 판단에 따른 주기 조절 |
-| **Kafka** | 실시간 tick 토픽(24시간 보관)과 잘못된 메시지를 격리하는 DLQ 토픽 |
-| **backend (Fastify)** | Kafka를 읽어 WebSocket으로 즉시 전송(Gateway), 과거 그래프용 REST API(History API) |
+| **krx-collector** | KRX Open API에서 코스피200 변동성지수와 KRX 섹터 지수 5종의 일별 종가를 받습니다(최근 1년 채우기, 이후 30분마다 확인) |
+| **disclosure-collector** | DART OpenAPI에서 유가증권 공시를 1분 주기(평일 낮)로 받고, 증자·사채 발행·자사주 공시는 금액을 함께 받습니다. 공시 제출인 이름은 저장하지 않습니다 |
+| **flows-collector** | KIS Open API의 시장별 투자자 순매수 수집기(키 입력 전에는 대기, 화면은 "데이터 준비 중") |
+| **Kafka** | 실시간 tick(24시간 보관), 일별 지수·공시·투자자 흐름(7일 보관) 토픽과 각각의 DLQ |
+| **backend (Fastify)** | Kafka를 읽어 WebSocket으로 즉시 전송(Gateway), 과거 그래프·공시 REST API |
 | **db-sink** | Kafka를 따로 읽어 TimescaleDB에 묶음 저장. 저장에 성공한 뒤에만 읽은 위치를 기록해서 데이터를 잃지 않습니다 |
-| **TimescaleDB** | 원본 tick은 3시간만 보관하고, 5분·1시간·1일 봉을 계층형 연속 집계로 1년 보관 |
+| **TimescaleDB** | 원본 tick은 3시간만 보관하고, 5분·1시간·1일 봉을 계층형 연속 집계로 1년 보관. 일별 지수·공시·투자자 흐름도 1년 보관 |
 | **Redis** | 최신값 캐시(새로 접속한 화면에 바로 표시), 과거 조회 캐시 |
-| **frontend (React + Vite)** | 흑백 라이트·다크 테마 대시보드. 브라우저 탭 하나가 WebSocket 연결 하나를 공유합니다 |
+| **frontend (React + Vite)** | 흑백 라이트·다크 테마에 은은한 강조색, 왼쪽 사이드바 메뉴. 브라우저 탭 하나가 WebSocket 연결 하나를 공유합니다 |
 | **Prometheus / Grafana** | 단계별 지연, 수집 성공률, 컨슈머 지연, DB 용량 대시보드와 알림 규칙 |
 
 ---
@@ -77,10 +86,11 @@ worker ── 값 검증 · 심볼 정규화 · 바뀐 값만 전송 ──▶ K
 
 ## Quick Start - 로컬 실행
 
-**단 하나의 명령어로 11개 서비스(DB, 캐시, 카프카, 백엔드, 수집기, DB 적재기, 프론트엔드, 모니터링)가 구동되도록 세팅**해 두었습니다. 별도의 `.env` 설정 없이 실행됩니다.
+**단 하나의 명령어로 14개 서비스(DB, 캐시, 카프카, 백엔드, 수집기 4종, DB 적재기, 프론트엔드, 모니터링)가 구동되도록 세팅**해 두었습니다. 별도의 `.env` 설정 없이도 실행되며, 이 경우 키가 필요한 수집기(KRX·DART·KIS)는 대기하고 해당 화면은 비어 있습니다.
 
 ### 요구 사항
 *   Docker 및 Docker Compose 설치
+*   (선택) KRX·DART 데이터를 받으려면 각 사이트에서 무료 인증키를 발급받아 **프로젝트 최상위 `.env`**에 `KRX_API_KEY`, `DART_API_KEY`로 넣습니다. KRX는 사용할 서비스(지수 일별 시세)별 이용 승인이 필요합니다. `.env`는 git에 올라가지 않습니다
 
 ### 실행 명령어
 ```bash
@@ -97,15 +107,15 @@ docker-compose down
 
 | 서비스 명 | 접속 주소 | 설명 |
 | :--- | :--- | :--- |
-| **프론트엔드 대시보드** | `http://localhost:5173` | 메인 UI (오른쪽 위 버튼으로 라이트·다크 전환) |
+| **프론트엔드 대시보드** | `http://localhost:5173` | 메인 UI (왼쪽 사이드바 아래 버튼으로 라이트·다크 전환) |
 | **백엔드 API 서버** | `http://localhost:3001` | REST API 및 WebSocket |
 | **Grafana 모니터링** | `http://localhost:3000` | "KOSPI Pipeline" 대시보드와 알림 규칙 자동 등록. 초기 계정은 Grafana 기본값(`admin` / `admin`)이며, 로컬 실습용입니다 |
 | **Prometheus** | `http://localhost:9090` | 지표 원본 조회 |
 
 ### 테스트
 ```bash
-cd backend && npm test     # 메시지 검증, 장 시간·휴장 판단, 심볼 허용 목록
-cd frontend && npm test    # 차트 점 계산, 장 상태 배지, 숫자 표시
+cd backend && npm test     # 메시지 검증, 장 시간·휴장 판단, 심볼 허용 목록, 공시 분류, 외부 API 호출 보호
+cd frontend && npm test    # 차트 점 계산, 장 상태 배지, 숫자·금액 표시
 ```
 Node 22 내장 테스트 러너(`node:test`)를 사용합니다. Docker 이미지 빌드와 GitHub Actions CI에서도 자동으로 실행되며, 테스트가 실패하면 이미지가 만들어지지 않습니다.
 
@@ -117,11 +127,13 @@ Node 22 내장 테스트 러너(`node:test`)를 사용합니다. Docker 이미�
 | :--- | :--- |
 | 실시간 지표 (10개) | KOSPI, KOSDAQ, 원/달러, 달러 인덱스, 미 국채 10년물, S&P 500, 나스닥 100, 필라델피아 반도체, WTI, 구리 (Yahoo Finance) |
 | 지연 시세 | 달러 인덱스·WTI·구리는 약 10분, 미 국채 10년물은 약 15분 늦은 시세이며, 화면에 "지연" 배지로 표시됩니다 |
-| 준비 중 지표 (6개) | 코스피200 변동성지수, KRX 섹터 지수 5종은 수집을 준비하고 있어 "데이터 준비 중"으로 표시됩니다 |
+| 일별 지표 (6개) | 코스피200 변동성지수, KRX 섹터 지수 5종(반도체·정보기술·자동차·은행·헬스케어)은 KRX Open API의 **일별 종가**라 1주 ~ 1년 그래프만 있고 "일별 시세" 배지가 붙습니다 |
+| 공시·자본 이벤트 | 유가증권시장 공시 속보(분류 필터, DART 원문 링크)와 기간별 희석(유상증자·사채) / 주주환원(자사주 취득·소각) 금액. 금액을 알 수 없는 공시는 0이 아니라 "금액 없음"으로 표시하고 합계에서 뺍니다 |
+| 증시 자금 흐름 | KIS 키 입력 전까지 "데이터 준비 중" |
 | 과거 그래프 | 1일(5분 봉), 1주(1시간 봉), 1개월·3개월·1년(1일 봉). 최초 실행 시 채운 과거 데이터는 종가 기준입니다 |
 | 장 상태 | 시장별 정규 거래 시간과 소스의 장 상태로 "장중 / 휴장 / 장 마감"을 표시합니다 |
 
-Yahoo Finance는 공식 공개 API가 아니므로, 학습·개인 용도로만 사용하시기 바랍니다.
+Yahoo Finance는 공식 공개 API가 아니므로, 학습·개인 용도로만 사용하시기 바랍니다. KRX·DART 데이터는 각 기관의 이용약관을 따릅니다.
 
 ---
 
@@ -135,12 +147,15 @@ Yahoo Finance는 공식 공개 API가 아니므로, 학습·개인 용도로만 
 | `KAFKA_BROKERS` | `localhost:9092` | Compose 안에서는 `kafka:29092` |
 | `REDIS_URL`, `DB_HOST` 등 | localhost 기본값 | 접속 정보는 모두 환경변수로 받습니다 |
 | `VITE_SOCKET_URL`, `VITE_API_URL` | `http://localhost:3001` 기준 | 프론트엔드가 접속할 주소 |
+| `KRX_API_KEY`, `DART_API_KEY` | 없음 (최상위 `.env`) | 없으면 해당 수집기는 대기 |
+| `KRX_BACKFILL_DAYS` / `DISCLOSURE_BACKFILL_DAYS` | 370 / 90 | 처음 채우는 기간(이미 저장된 기간은 건너뜀). 0이면 채우지 않음 |
+| `BACKEND_URL` | `http://localhost:3001` (Compose에서는 `http://backend:3001`) | 수집기가 저장된 기간을 묻는 내부 주소 |
 
 ---
 
 ## 클라우드 배포 가이드라인 (AWS EKS & ArgoCD)
 
-> ⚠️ **`k8s/` 매니페스트는 현재 아키텍처(DB 적재기 분리, 테스트·healthcheck, 장 시간 기반 수집 등)에 맞게 아직 갱신되지 않았습니다.** 배포 전에 매니페스트 현행화와 비밀값 분리(Kubernetes Secret)가 필요합니다. 아래 내용은 클러스터 실습 절차입니다.
+> ⚠️ **`k8s/` 매니페스트는 현재 아키텍처(DB 적재기 분리, KRX·DART·KIS 수집기, 테스트·healthcheck, 장 시간 기반 수집 등)에 맞게 아직 갱신되지 않았습니다.** 배포 전에 매니페스트 현행화와 비밀값 분리(Kubernetes Secret)가 필요합니다. 아래 내용은 클러스터 실습 절차입니다.
 
 그전에 도커 허브에 push가 진행되어야 합니다.
 

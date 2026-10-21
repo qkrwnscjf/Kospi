@@ -9,6 +9,24 @@ const STORAGE_KEY = 'kospi-theme'
 
 const currentTheme = (): Theme => (document.documentElement.classList.contains('dark') ? 'dark' : 'light')
 
+// CSS 색 토큰을 실제 색 문자열로 읽는다 (예: 'up' → 'rgb(21 128 61)'). 막대별 색처럼 currentColor로 칠할 수 없는 SVG에 쓴다.
+// 테마(<html class="dark">)가 바뀌면 다시 읽는다.
+export function useTokenColors<T extends string>(names: readonly T[]): Record<T, string> {
+  const read = () =>
+    Object.fromEntries(
+      names.map(name => [name, `rgb(${getComputedStyle(document.documentElement).getPropertyValue(`--color-${name}`).trim()})`])
+    ) as Record<T, string>
+  const [colors, setColors] = useState(read)
+  useEffect(() => {
+    const observer = new MutationObserver(() => setColors(read()))
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    return () => observer.disconnect()
+    // names는 호출하는 곳에서 고정된 배열로 넘긴다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  return colors
+}
+
 export function useTheme() {
   const [theme, setTheme] = useState<Theme>(currentTheme)
 

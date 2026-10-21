@@ -3,6 +3,10 @@ import { dbPool } from '../db.js';
 import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsServer } from '../metrics.js';
 import { parseTick } from '../../shared/tick-validation.js';
 import type { TickData } from '../../shared/types.js';
+import { parseInvestorFlow, type InvestorFlow } from '../../shared/flows.js';
+import { parseDisclosure, type Disclosure } from '../../shared/disclosures.js';
+import { isKrxDailySymbol } from '../../shared/krx-indices.js';
+import type { EachBatchPayload } from 'kafkajs';
 import { runBackfillOnce } from './backfill.js';
 import { registerShutdown } from '../shutdown.js';
 
@@ -33,6 +37,9 @@ const dbJobLastSuccessAge = new Gauge('kospi_db_job_last_success_age_seconds', '
 const dbJobFailures = new Gauge('kospi_db_job_failures', 'Total failures of each TimescaleDB job');
 const dbRawOldestAge = new Gauge('kospi_db_raw_oldest_age_seconds', 'Age of the oldest row in market_ticks (raw retention target: 3h, D-02)');
 const DB_SIZE_INTERVAL_MS = 5 * 60 * 1000;
+// 11단계·12단계·T-67에서 추가한 테이블 (용량·청크·행 수 기록). 이름은 고정 목록이고 매개변수로만 SQL에 넘긴다.
+const EXTRA_TABLES = ['investor_flows', 'index_daily', 'disclosures'];
+const dbRows = new Gauge('kospi_db_rows', 'Row count of the smaller hypertables added in stages 11-12 (investor_flows, index_daily, disclosures)');
 
 // 여러 행을 INSERT 한 번으로 저장한다 (P-16). 단일 문장이라 전부 들어가거나 전부 실패한다.
 // 실제로 들어간 행 수를 돌려준다. 나머지는 유니크 제약에 걸려 건너뛴 중복이다 (T-15).
@@ -51,23 +58,155 @@ async function insertBatch(ticks: TickData[]) {
   return result.rowCount ?? 0;
 }
 
+// 증시 자금 흐름 저장 (docs/Task_ORDER.md 11단계 A, D-47)
+// 같은 (market, time)이면 덮어쓰되, 이미 확정치(final)인 행은 잠정치(provisional)로 되돌리지 않는다.
+const flowRowsUpserted = new Counter('kospi_sink_flow_rows_upserted_total', 'Investor flow rows inserted or updated');
+
+async function upsertFlows(flows: InvestorFlow[]) {
+  const values: unknown[] = [];
+  const rows = flows.map((flow, index) => {
+    const base = index * 7;
+    values.push(flow.time, flow.market, flow.foreignNet, flow.institutionNet, flow.individualNet, flow.status, flow.source);
+    return `(to_timestamp($${base + 1} / 1000.0), $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`;
+  });
+  const result = await dbPool.query(
+    `INSERT INTO investor_flows (time, market, foreign_net, institution_net, individual_net, status, source) VALUES ${rows.join(', ')}
+     ON CONFLICT (market, time) DO UPDATE SET
+       foreign_net = EXCLUDED.foreign_net,
+       institution_net = EXCLUDED.institution_net,
+       individual_net = EXCLUDED.individual_net,
+       status = EXCLUDED.status,
+       source = EXCLUDED.source
+     WHERE investor_flows.status <> 'final' OR EXCLUDED.status = 'final'`,
+    values
+  );
+  return result.rowCount ?? 0;
+}
+
+// 증시 자금 흐름 묶음 처리. 시세 묶음 처리와 같은 규칙: 잘못된 메시지는 DLQ, 저장에 성공한 뒤에만 오프셋 확정.
+async function handleFlowsBatch({ batch, resolveOffset, heartbeat }: EachBatchPayload) {
+  const valid: InvestorFlow[] = [];
+  for (const message of batch.messages) {
+    const parsed = parseInvestorFlow(message.value);
+    if (!parsed.ok) {
+      invalidTotal.inc({ reason: `flow_${parsed.reason}` });
+      console.warn(`DB sink skipped invalid flow message at ${batch.topic}[${batch.partition}]@${message.offset}: ${parsed.reason}`);
+      await sendToDlq(dlqProducer, { consumer: CONSUMER_NAME, topic: batch.topic, partition: batch.partition, message, reason: parsed.reason });
+      continue;
+    }
+    valid.push(parsed.flow);
+  }
+  if (valid.length > 0) {
+    // 예외는 그대로 던져서 오프셋을 확정하지 않는다 (kafkajs가 다시 시도)
+    flowRowsUpserted.inc({}, await upsertFlows(valid));
+  }
+  const lastMessage = batch.messages[batch.messages.length - 1];
+  if (lastMessage) resolveOffset(lastMessage.offset);
+  await heartbeat();
+}
+
+// KRX 일별 지수 저장 (docs/Task_ORDER.md T-67). 같은 (symbol, time)이면 최신 값으로 덮어쓴다(정정 반영).
+const indexDailyRowsUpserted = new Counter('kospi_sink_index_daily_rows_upserted_total', 'KRX daily index rows inserted or updated');
+
+async function upsertIndexDaily(ticks: TickData[]) {
+  const values: unknown[] = [];
+  const rows = ticks.map((tick, index) => {
+    const base = index * 5;
+    values.push(tick.timestamp, tick.symbol, tick.price, tick.changeRate, tick.changePrice ?? null);
+    return `(to_timestamp($${base + 1} / 1000.0), $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, 'krx')`;
+  });
+  const result = await dbPool.query(
+    `INSERT INTO index_daily (time, symbol, close, change_rate, change_price, source) VALUES ${rows.join(', ')}
+     ON CONFLICT (symbol, time) DO UPDATE SET
+       close = EXCLUDED.close, change_rate = EXCLUDED.change_rate, change_price = EXCLUDED.change_price`,
+    values
+  );
+  return result.rowCount ?? 0;
+}
+
+// DART 공시 저장 (12단계 T-76). 같은 접수번호면 내용을 갱신하되, 금액은 새 값이 없으면 기존 값을 유지하고
+// 처음 본 시각(first_seen_at)은 바꾸지 않는다.
+const disclosureRowsUpserted = new Counter('kospi_sink_disclosure_rows_upserted_total', 'DART disclosure rows inserted or updated');
+
+async function upsertDisclosures(items: Disclosure[]) {
+  const values: unknown[] = [];
+  const rows = items.map((item, index) => {
+    const base = index * 11;
+    values.push(item.rceptDate, item.rceptNo, item.corpCode, item.stockCode, item.corpName, item.reportName,
+      item.group, item.kind, item.isCorrection, item.amount, item.market);
+    return `($${base + 1}::date, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`;
+  });
+  const result = await dbPool.query(
+    `INSERT INTO disclosures (rcept_date, rcept_no, corp_code, stock_code, corp_name, report_name, event_group, event_kind, is_correction, amount, market)
+     VALUES ${rows.join(', ')}
+     ON CONFLICT (rcept_no, rcept_date) DO UPDATE SET
+       corp_name = EXCLUDED.corp_name, report_name = EXCLUDED.report_name,
+       event_group = EXCLUDED.event_group, event_kind = EXCLUDED.event_kind, is_correction = EXCLUDED.is_correction,
+       amount = COALESCE(EXCLUDED.amount, disclosures.amount)`,
+    values
+  );
+  return result.rowCount ?? 0;
+}
+
+// 한 묶음 안에 같은 키가 두 번 있으면 ON CONFLICT DO UPDATE가 실패하므로 마지막 값만 남긴다
+const lastByKey = <T>(items: T[], keyOf: (item: T) => string) => [...new Map(items.map(item => [keyOf(item), item])).values()];
+
+// KRX 일별 지수·DART 공시 묶음 처리. 시세 묶음 처리와 같은 규칙: 잘못된 메시지는 DLQ, 저장에 성공한 뒤에만 오프셋 확정.
+async function handleDailyBatch({ batch, resolveOffset, heartbeat }: EachBatchPayload) {
+  const isIndex = batch.topic === TOPICS.indexDaily;
+  const ticks: TickData[] = [];
+  const disclosures: Disclosure[] = [];
+  for (const message of batch.messages) {
+    let reason: string | undefined;
+    if (isIndex) {
+      const parsed = parseTick(message.value);
+      if (!parsed.ok) reason = parsed.reason;
+      else if (!isKrxDailySymbol(parsed.tick.symbol)) reason = 'not_daily_symbol';
+      else ticks.push(parsed.tick);
+    } else {
+      const parsed = parseDisclosure(message.value);
+      if (!parsed.ok) reason = parsed.reason;
+      else disclosures.push(parsed.disclosure);
+    }
+    if (reason) {
+      invalidTotal.inc({ reason: `${isIndex ? 'index' : 'disclosure'}_${reason}` });
+      console.warn(`DB sink skipped invalid message at ${batch.topic}[${batch.partition}]@${message.offset}: ${reason}`);
+      await sendToDlq(dlqProducer, { consumer: CONSUMER_NAME, topic: batch.topic, partition: batch.partition, message, reason });
+    }
+  }
+  // 예외는 그대로 던져서 오프셋을 확정하지 않는다 (kafkajs가 다시 시도)
+  if (ticks.length > 0) indexDailyRowsUpserted.inc({}, await upsertIndexDaily(lastByKey(ticks, tick => `${tick.symbol}|${tick.timestamp}`)));
+  for (let index = 0; index < disclosures.length; index += 500) {
+    const chunk = lastByKey(disclosures.slice(index, index + 500), item => item.rceptNo);
+    disclosureRowsUpserted.inc({}, await upsertDisclosures(chunk));
+  }
+  const lastMessage = batch.messages[batch.messages.length - 1];
+  if (lastMessage) resolveOffset(lastMessage.offset);
+  await heartbeat();
+}
+
 // 원본과 집계의 용량, 청크 수, 보관·갱신 작업 상태를 기록한다 (B-07, T-31, T-48). 조회 실패는 수집에 영향을 주지 않도록 로그만 남긴다.
 async function recordDbSize() {
   try {
     const { rows } = await dbPool.query<{ relation: string; bytes: string }>(`
       SELECT 'market_ticks' AS relation, hypertable_size('market_ticks')::text AS bytes
       UNION ALL
+      SELECT name AS relation, hypertable_size(name::regclass)::text AS bytes
+      FROM unnest($1::text[]) AS name
+      UNION ALL
       SELECT view_name::text AS relation,
              hypertable_size(format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name)::regclass)::text AS bytes
       FROM timescaledb_information.continuous_aggregates
-    `);
+    `, [EXTRA_TABLES]);
     for (const row of rows) {
       dbSizeBytes.set({ relation: row.relation }, Number(row.bytes));
     }
 
     const chunks = await dbPool.query<{ relation: string; chunks: string }>(`
-      SELECT 'market_ticks' AS relation, count(*)::text AS chunks
-      FROM timescaledb_information.chunks WHERE hypertable_name = 'market_ticks'
+      SELECT name AS relation, count(c.chunk_name)::text AS chunks
+      FROM unnest($1::text[]) AS name
+      LEFT JOIN timescaledb_information.chunks c ON c.hypertable_name = name
+      GROUP BY name
       UNION ALL
       SELECT ca.view_name::text AS relation, count(c.chunk_name)::text AS chunks
       FROM timescaledb_information.continuous_aggregates ca
@@ -75,9 +214,19 @@ async function recordDbSize() {
         ON c.hypertable_schema = ca.materialization_hypertable_schema
        AND c.hypertable_name = ca.materialization_hypertable_name
       GROUP BY ca.view_name
-    `);
+    `, [['market_ticks', ...EXTRA_TABLES]]);
     for (const row of chunks.rows) {
       dbChunks.set({ relation: row.relation }, Number(row.chunks));
+    }
+
+    // 새 테이블은 행이 적어서(수만 행 이하) 정확한 행 수를 센다. 행당 용량을 계산해 1년 용량 추정에 쓴다.
+    const counts = await dbPool.query<{ relation: string; rows: string }>(`
+      SELECT 'investor_flows' AS relation, count(*)::text AS rows FROM investor_flows
+      UNION ALL SELECT 'index_daily', count(*)::text FROM index_daily
+      UNION ALL SELECT 'disclosures', count(*)::text FROM disclosures
+    `);
+    for (const row of counts.rows) {
+      dbRows.set({ relation: row.relation }, Number(row.rows));
     }
 
     // 보관(retention)과 집계 갱신(refresh) 작업 (T-48). 집계 작업은 저장 테이블 대신 집계 이름으로 표시한다.
@@ -117,7 +266,7 @@ async function run() {
   await ensureTopics();
   await consumer.connect();
   // 그룹이 처음 시작할 때만 토픽의 처음부터 읽는다. 이후에는 커밋된 오프셋부터 이어서 읽는다.
-  await consumer.subscribe({ topic: TOPICS.ticks, fromBeginning: true });
+  await consumer.subscribe({ topics: [TOPICS.ticks, TOPICS.flows, TOPICS.indexDaily, TOPICS.disclosures], fromBeginning: true });
 
   // kafkajs가 스스로 재시작하지 않는 중단이면 종료해서 docker-compose의 restart: on-failure가 다시 띄우게 한다.
   consumer.on(consumer.events.CRASH, event => {
@@ -130,7 +279,17 @@ async function run() {
 
   await consumer.run({
     eachBatchAutoResolve: false,
-    eachBatch: async ({ batch, resolveOffset, heartbeat }) => {
+    eachBatch: async payload => {
+      // 토픽별로 나눠 처리한다 (11단계: investor-flows 추가)
+      if (payload.batch.topic === TOPICS.flows) {
+        await handleFlowsBatch(payload);
+        return;
+      }
+      if (payload.batch.topic === TOPICS.indexDaily || payload.batch.topic === TOPICS.disclosures) {
+        await handleDailyBatch(payload);
+        return;
+      }
+      const { batch, resolveOffset, heartbeat } = payload;
       const valid: TickData[] = [];
 
       for (const message of batch.messages) {

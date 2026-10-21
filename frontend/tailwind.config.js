@@ -24,6 +24,7 @@ export default {
         },
         up: token('up'),
         down: token('down'),
+        neon: token('neon'), // 강조 1색 (T-69, D-54)
       },
       // 외부 웹 폰트를 불러오지 않고 운영체제 기본 글꼴을 쓴다 (T-44: 방문자 IP가 외부로 전달되지 않음)
       fontFamily: {

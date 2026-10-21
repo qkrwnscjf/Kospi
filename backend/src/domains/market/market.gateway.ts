@@ -1,5 +1,8 @@
 import { Server, Socket } from 'socket.io';
-import type { Consumer, EachMessagePayload } from 'kafkajs';
+import type { Consumer, EachMessagePayload, KafkaMessage } from 'kafkajs';
+import { flowRoom, isFlowMarket, parseInvestorFlow } from '../../shared/flows.js';
+import { DISCLOSURE_ROOM, isTargetStock, parseDisclosure } from '../../shared/disclosures.js';
+import { isKrxDailySymbol } from '../../shared/krx-indices.js';
 import { kafka, TOPICS, ensureTopics, sendToDlq } from '../../infrastructure/kafka.js';
 import { Counter, Gauge, Latency } from '../../infrastructure/metrics.js';
 import { marketService } from './market.service.js';
@@ -32,6 +35,14 @@ const redisSkippedTotal = new Counter('kospi_gateway_redis_skipped_total', 'Late
 // 구독 요청 검증 (docs/security.md SEC-005)
 const subscribeRejectedTotal = new Counter('kospi_gateway_subscribe_rejected_total', 'Rejected subscribe / unsubscribe requests by reason');
 
+// 증시 자금 흐름 (11단계)
+const flowMessagesTotal = new Counter('kospi_gateway_flow_messages_total', 'Investor flow messages emitted by the gateway');
+const flowPipelineLatency = new Latency('kospi_gateway_flow_pipeline_latency_seconds', 'Flows collector collection to WebSocket emit');
+
+// KRX 일별 지수·DART 공시 (T-67, 12단계)
+const dailyMessagesTotal = new Counter('kospi_gateway_daily_index_messages_total', 'KRX daily index messages emitted by the gateway');
+const disclosureMessagesTotal = new Counter('kospi_gateway_disclosure_messages_total', 'Live DART disclosures emitted by the gateway');
+
 const RECONNECT_INITIAL_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 const CONSUMER_NAME = 'gateway';
@@ -43,6 +54,18 @@ const dlqProducer = kafka.producer();
 // 이 핸들러는 예외를 던지지 않는다. 던지면 kafkajs가 같은 메시지를 계속 다시 시도해서 실시간 경로 전체가 멈춘다 (SEC-002).
 const handleMessage = (io: Server) => async ({ topic, partition, message }: EachMessagePayload) => {
   const consumedAt = Date.now();
+  if (topic === TOPICS.flows) {
+    await handleFlowMessage(io, topic, partition, message, consumedAt);
+    return;
+  }
+  if (topic === TOPICS.indexDaily) {
+    await handleIndexDailyMessage(io, topic, partition, message);
+    return;
+  }
+  if (topic === TOPICS.disclosures) {
+    await handleDisclosureMessage(io, topic, partition, message);
+    return;
+  }
   const parsed = parseTick(message.value);
   if (!parsed.ok) {
     invalidTotal.inc({ reason: parsed.reason });
@@ -70,6 +93,73 @@ const handleMessage = (io: Server) => async ({ topic, partition, message }: Each
 
   void cacheLatestTick(tick);
 };
+
+// 증시 자금 흐름 (docs/Task_ORDER.md 11단계 A). 시세와 같은 규칙: 검증 → 먼저 전송 → 캐시는 기다리지 않음. 예외를 던지지 않는다.
+async function handleFlowMessage(io: Server, topic: string, partition: number, message: KafkaMessage, consumedAt: number) {
+  const parsed = parseInvestorFlow(message.value);
+  if (!parsed.ok) {
+    invalidTotal.inc({ reason: `flow_${parsed.reason}` });
+    console.warn(`Gateway skipped invalid flow message at ${topic}[${partition}]@${message.offset}: ${parsed.reason}`);
+    await sendToDlq(dlqProducer, { consumer: CONSUMER_NAME, topic, partition, message, reason: parsed.reason });
+    return;
+  }
+  const flow = parsed.flow;
+  io.to(flowRoom(flow.market)).emit('flow', flow);
+  flowMessagesTotal.inc();
+  if (flow.collectedAt !== undefined) flowPipelineLatency.observe({}, Date.now() - flow.collectedAt);
+  emitDelay.observe({}, Date.now() - consumedAt);
+
+  void marketService.saveLatestFlow(flow).catch(error => {
+    redisErrorsTotal.inc();
+    console.error(`Gateway failed to cache latest flow for ${flow.market}: ${errorMessage(error)}`);
+  });
+}
+
+// KRX 일별 지수 (docs/Task_ORDER.md T-67). 시세와 같은 'tick' 이벤트로 보내서 화면 카드가 그대로 받는다.
+// 소스 시각이 하루 전이라 지연 지표(e2e·pipeline)에는 넣지 않는다. 최신값 캐시는 더 새로운 날짜일 때만 바꾼다.
+async function handleIndexDailyMessage(io: Server, topic: string, partition: number, message: KafkaMessage) {
+  const parsed = parseTick(message.value);
+  const reason = !parsed.ok ? parsed.reason : !isKrxDailySymbol(parsed.tick.symbol) ? 'not_daily_symbol' : undefined;
+  if (reason || !parsed.ok) {
+    invalidTotal.inc({ reason: `index_${reason ?? 'unknown'}` });
+    console.warn(`Gateway skipped invalid daily index message at ${topic}[${partition}]@${message.offset}: ${reason}`);
+    await sendToDlq(dlqProducer, { consumer: CONSUMER_NAME, topic, partition, message, reason: reason ?? 'unknown' });
+    return;
+  }
+  const tick = parsed.tick;
+  io.to(tick.symbol).emit('tick', tick);
+  dailyMessagesTotal.inc();
+  void marketService.saveLatestTickIfNewer(tick).catch(error => {
+    redisErrorsTotal.inc();
+    console.error(`Gateway failed to cache latest daily index for ${tick.symbol}: ${errorMessage(error)}`);
+  });
+}
+
+// DART 공시 (12단계). 수집 주기에 새로 발견한 공시(live)만 화면에 바로 보낸다. 과거 채우기분은 REST로만 보인다.
+async function handleDisclosureMessage(io: Server, topic: string, partition: number, message: KafkaMessage) {
+  const parsed = parseDisclosure(message.value);
+  if (!parsed.ok) {
+    invalidTotal.inc({ reason: `disclosure_${parsed.reason}` });
+    console.warn(`Gateway skipped invalid disclosure message at ${topic}[${partition}]@${message.offset}: ${parsed.reason}`);
+    await sendToDlq(dlqProducer, { consumer: CONSUMER_NAME, topic, partition, message, reason: parsed.reason });
+    return;
+  }
+  const { disclosure } = parsed;
+  if (!disclosure.live || !isTargetStock(disclosure.stockCode)) return;
+  // 브라우저에는 화면에 필요한 필드만 보낸다 (수집 시각 등 내부 값 제외)
+  io.to(DISCLOSURE_ROOM).emit('disclosure', {
+    rceptNo: disclosure.rceptNo,
+    rceptDate: disclosure.rceptDate,
+    stockCode: disclosure.stockCode,
+    corpName: disclosure.corpName,
+    reportName: disclosure.reportName,
+    group: disclosure.group,
+    kind: disclosure.kind,
+    isCorrection: disclosure.isCorrection,
+    amount: disclosure.amount,
+  });
+  disclosureMessagesTotal.inc();
+}
 
 // 최신 tick을 Redis에 저장한다. 예외를 던지지 않는다 (실패해도 실시간 전송에는 영향 없음).
 async function cacheLatestTick(tick: TickData) {
@@ -100,7 +190,7 @@ async function startConsumer(io: Server) {
     await dlqProducer.connect();
     await ensureTopics();
     await consumer.connect();
-    await consumer.subscribe({ topic: TOPICS.ticks, fromBeginning: false });
+    await consumer.subscribe({ topics: [TOPICS.ticks, TOPICS.flows, TOPICS.indexDaily, TOPICS.disclosures], fromBeginning: false });
 
     consumer.on(consumer.events.GROUP_JOIN, () => kafkaConnected.set({}, 1));
     consumer.on(consumer.events.CRASH, event => {
@@ -164,7 +254,7 @@ export const initMarketGateway = (io: Server) => {
 
     // 구독 요청은 허용된 심볼 문자열만 받는다 (docs/security.md SEC-005).
     // 목록에 없는 값은 방을 만들지 않고, 로그에도 받은 값을 그대로 쓰지 않는다(로그 위조 방지).
-    // 이미 참여한 방이면 다시 조회하지 않으므로, 연결 하나가 만드는 방과 Redis 조회는 심볼 수(16개)를 넘지 않는다.
+    // 이미 참여한 방이면 다시 조회하지 않으므로, 연결 하나가 만드는 방과 Redis 조회는 허용 목록 수(시세 16 + 자금 흐름 2)를 넘지 않는다.
     socket.on('subscribe_market', async (symbol: unknown) => {
       if (!isSubscribableSymbol(symbol)) {
         subscribeRejectedTotal.inc({ event: 'subscribe', reason: 'unknown_symbol' });
@@ -177,11 +267,21 @@ export const initMarketGateway = (io: Server) => {
       socket.join(symbol);
       console.log(`Client ${socket.id} subscribed to ${symbol}`);
 
-      // Send the most recent cached tick immediately upon subscription
+      // Send the most recent cached value immediately upon subscription (자금 흐름 방은 최신 flow)
       try {
-        const latestTick = await marketService.getLatestTick(symbol);
-        if (latestTick) {
-          socket.emit('tick', latestTick);
+        const flowMarket = symbol.startsWith('flows:') ? symbol.slice('flows:'.length) : undefined;
+        if (symbol === DISCLOSURE_ROOM) {
+          // 공시 목록의 첫 화면은 REST로 받는다. 방에는 참여만 한다.
+        } else if (flowMarket !== undefined) {
+          const latestFlow = isFlowMarket(flowMarket) ? await marketService.getLatestFlow(flowMarket) : null;
+          if (latestFlow) socket.emit('flow', latestFlow);
+        } else {
+          // KRX 일별 지수는 캐시가 비어 있으면(Gateway가 뜨기 전에 수집된 경우) DB의 마지막 값으로 채운다 (T-67)
+          const latestTick = (await marketService.getLatestTick(symbol))
+            ?? (isKrxDailySymbol(symbol) ? await marketService.getLatestDailyIndex(symbol) : null);
+          if (latestTick) {
+            socket.emit('tick', latestTick);
+          }
         }
       } catch (error) {
         redisErrorsTotal.inc();

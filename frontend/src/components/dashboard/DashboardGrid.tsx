@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { formatClock } from '@/lib/format'
 import { useConnectionStatus, useLastReceivedAt } from '@/hooks/useMarketData'
+import { DisclosureDashboard } from '@/components/disclosures/DisclosureDashboard'
 
 interface DashboardGridProps {
   categoryId: string
@@ -14,6 +15,14 @@ const categoryNames: Record<string, string> = {
   category2: '매크로 및 환율',
   category3: '글로벌 연동',
   category4: '국내 섹터 모멘텀',
+  category5: '증시 자금 흐름',
+  category6: '공시·자본 이벤트',
+}
+
+const categoryDescriptions: Record<string, string> = {
+  category4: ' 국내 주요 섹터의 모멘텀을 한눈에 파악하고 비교할 수 있습니다. 섹터 지수는 KRX 일별 시세입니다.',
+  category5: ' 외국인·기관·개인 중 누가 사고 누가 파는지, 돈의 흐름을 보여 줍니다.',
+  category6: ' 새 공시와 증자·사채 발행(희석), 자사주 취득·소각(주주환원) 규모를 보여 줍니다.',
 }
 
 // 하단 상태 표시는 고정 문구가 아니라 실제 연결 상태와 마지막 수신 시각을 보여 준다 (T-33).
@@ -49,8 +58,26 @@ function StatusFooter() {
         </div>
       </div>
 
-      <span className="text-[11px] text-fg-muted">시세 출처: Yahoo Finance · 일부 지표는 10~15분 지연 시세</span>
+      <span className="text-[11px] text-fg-muted">시세 출처: Yahoo Finance(일부 10~15분 지연) · KRX Open API(일별) · 공시: 금융감독원 DART</span>
     </footer>
+  )
+}
+
+// 증시 자금 흐름 탭은 수집 소스가 정해질 때까지 "데이터 준비 중"으로 둔다 (T-70, D-55).
+// 수집기·API·흐름 화면(components/flows/FlowDashboard.tsx) 코드는 그대로 두고, 이 탭에서만 보여 주지 않는다.
+function FlowsPending() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+      className="card-neon flex h-[340px] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-surface px-6 text-center"
+    >
+      <span className="text-sm font-medium text-fg">데이터 준비 중</span>
+      <span className="max-w-md text-xs leading-relaxed text-fg-muted">
+        외국인·기관·개인의 순매수 데이터 수집을 준비하고 있습니다. 준비가 끝나면 이 탭에 수급 흐름도와 추이 그래프가 표시됩니다.
+      </span>
+    </motion.div>
   )
 }
 
@@ -61,11 +88,11 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
 
   return (
     <div className="flex w-full flex-col items-center">
-      <header className="mb-12 mt-6 flex flex-col items-center text-center">
-        <div className="mb-5 flex items-center gap-3">
-          <div className="h-px w-10 bg-line" />
+      {/* 사이드바 옆에 붙도록 제목은 왼쪽 정렬 (T-68) */}
+      <header className="mb-10 mt-8 flex w-full flex-col items-start lg:mt-12">
+        <div className="mb-4 flex items-center gap-2.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-neon shadow-[0_0_8px_rgb(var(--color-neon))]" />
           <span className="text-[11px] font-semibold tracking-[0.25em] text-fg-muted">MARKET OVERVIEW</span>
-          <div className="h-px w-10 bg-line" />
         </div>
 
         <AnimatePresence mode="wait">
@@ -75,16 +102,14 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
             transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-            className="flex flex-col items-center"
+            className="flex flex-col items-start"
           >
             <h2 className="mb-3 text-3xl font-bold tracking-tight text-fg md:text-4xl">
               {categoryNames[categoryId]}
             </h2>
-            <p className="max-w-2xl px-4 text-xs leading-relaxed text-fg-muted md:text-sm">
+            <p className="max-w-2xl text-xs leading-relaxed text-fg-muted md:text-sm">
               실시간 시장 데이터를 기반으로 한 종합 모니터링 대시보드입니다.
-              {categoryId === 'category4'
-                ? ' 국내 주요 섹터의 모멘텀을 한눈에 파악하고 비교할 수 있습니다.'
-                : ' 주요 지표의 추세와 변동성을 정밀하게 분석합니다.'}
+              {categoryDescriptions[categoryId] ?? ' 주요 지표의 추세와 변동성을 정밀하게 분석합니다.'}
             </p>
           </motion.div>
         </AnimatePresence>
@@ -96,6 +121,12 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
         </div>
       )}
 
+      {/* 증시 자금 흐름 탭은 지표 카드 대신 준비 중 안내를 보여 준다 (T-70, D-55) */}
+      {categoryId === 'category5' ? (
+        <FlowsPending />
+      ) : categoryId === 'category6' ? (
+        <DisclosureDashboard />
+      ) : (
       <motion.div
         layout
         className={cn(
@@ -125,6 +156,7 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
           ))}
         </AnimatePresence>
       </motion.div>
+      )}
 
       <StatusFooter />
     </div>
