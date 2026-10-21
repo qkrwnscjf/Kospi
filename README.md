@@ -148,7 +148,7 @@ Yahoo Finance는 공식 공개 API가 아니므로, 학습·개인 용도로만 
 | `REDIS_URL`, `DB_HOST` 등 | localhost 기본값 | 접속 정보는 모두 환경변수로 받습니다 |
 | `VITE_SOCKET_URL`, `VITE_API_URL` | `http://localhost:3001` 기준 | 프론트엔드가 접속할 주소 |
 | `KRX_API_KEY`, `DART_API_KEY` | 없음 (최상위 `.env`) | 없으면 해당 수집기는 대기 |
-| `KRX_BACKFILL_DAYS` / `DISCLOSURE_BACKFILL_DAYS` | 370 / 90 | 처음 채우는 기간(이미 저장된 기간은 건너뜀). 0이면 채우지 않음 |
+| `KRX_BACKFILL_DAYS` / `DISCLOSURE_BACKFILL_DAYS` | 370 / 365 | 처음 채우는 기간(이미 저장된 기간은 건너뜀). 0이면 채우지 않음 |
 | `BACKEND_URL` | `http://localhost:3001` (Compose에서는 `http://backend:3001`) | 수집기가 저장된 기간을 묻는 내부 주소 |
 
 ---

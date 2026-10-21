@@ -113,14 +113,17 @@ export function sumAmountFields(row: Record<string, unknown>, fields: readonly s
 
 export const toDartDate = (isoDate: string) => isoDate.replace(/-/g, '');
 
-// 과거 채우기 시작일 (docs/security.md SEC-014). 날짜는 YYYYMMDD.
-// - 저장된 것이 없거나, 저장된 첫 날짜가 목표 시작일보다 toleranceDays 넘게 늦으면 목표 시작일부터 전부 받는다.
-// - 그렇지 않으면 저장된 마지막 날짜의 하루 전부터 받는다(그날 늦게 접수된 공시를 놓치지 않게). 중복은 DB가 갱신만 한다.
-export function backfillStart(targetStart: string, coverage: { earliest: string; latest: string } | null, toleranceDays = 3) {
-  if (!coverage) return targetStart;
-  if (coverage.earliest > shiftYmd(targetStart, toleranceDays)) return targetStart;
+// 과거 채우기 범위 (docs/security.md SEC-014, T-79). 날짜는 YYYYMMDD, 범위는 [시작, 끝] (양 끝 포함).
+// - 저장된 것이 없으면 목표 기간 전체.
+// - 저장된 첫 날짜가 목표 시작일보다 toleranceDays 넘게 늦으면 앞쪽 빈 기간 [목표 시작일, 저장된 첫 날짜 − 1일]을 받는다.
+// - 뒤쪽은 저장된 마지막 날짜의 하루 전부터 오늘까지 받는다(그날 늦게 접수된 공시를 놓치지 않게). 중복은 DB가 갱신만 한다.
+export function backfillRanges(targetStart: string, today: string, coverage: { earliest: string; latest: string } | null, toleranceDays = 3): [string, string][] {
+  if (!coverage) return [[targetStart, today]];
+  const ranges: [string, string][] = [];
+  if (coverage.earliest > shiftYmd(targetStart, toleranceDays)) ranges.push([targetStart, shiftYmd(coverage.earliest, -1)]);
   const fromLatest = shiftYmd(coverage.latest, -1);
-  return fromLatest > targetStart ? fromLatest : targetStart;
+  ranges.push([fromLatest > targetStart ? fromLatest : targetStart, today]);
+  return ranges;
 }
 
 function shiftYmd(date: string, days: number) {

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { KRX_DAILY_KEYS, isKrxDailySymbol, symbolForIndexName } from '../src/shared/krx-indices.js';
 import { NAVER_KEYS, isSubscribableSymbol } from '../src/shared/symbols.js';
 import { closeTimestamp, combineCoverage, mapIndexRows, missingDates, parseKrxNumber, seoulWeekdays, FIELDS } from '../src/infrastructure/krx/krx-index-daily.js';
-import { backfillStart } from '../src/infrastructure/disclosures/dart-disclosures.js';
+import { backfillRanges } from '../src/infrastructure/disclosures/dart-disclosures.js';
 import { DISCLOSURE_ROOM, parseDisclosure } from '../src/shared/disclosures.js';
 import { classifyReport, mapListItem, parseAmount, sumAmountFields } from '../src/infrastructure/disclosures/dart-disclosures.js';
 import { DartApiError, DartClient } from '../src/infrastructure/disclosures/dart-client.js';
@@ -73,11 +73,14 @@ test('여러 심볼의 저장 범위는 모두에게 있는 범위로 합치고,
   assert.equal(combineCoverage([]), null);
 });
 
-test('DART 과거 채우기 시작일: 저장된 마지막 날 하루 전부터, 없거나 앞이 비면 목표 시작일부터', () => {
-  assert.equal(backfillStart('20260722', null), '20260722');
-  assert.equal(backfillStart('20260722', { earliest: '20260722', latest: '20261020' }), '20261019');
-  assert.equal(backfillStart('20260722', { earliest: '20260901', latest: '20261020' }), '20260722');
-  assert.equal(backfillStart('20260722', { earliest: '20260722', latest: '20260722' }), '20260722');
+test('DART 과거 채우기 범위: 앞쪽 빈 기간과 마지막 저장일 하루 전 ~ 오늘만, 저장된 것이 없으면 전체', () => {
+  assert.deepEqual(backfillRanges('20251021', '20261021', null), [['20251021', '20261021']]);
+  // 90일만 저장된 상태에서 1년으로 늘림 → 앞쪽 빈 기간 + 뒤쪽
+  assert.deepEqual(backfillRanges('20251021', '20261021', { earliest: '20260723', latest: '20261021' }),
+    [['20251021', '20260722'], ['20261020', '20261021']]);
+  // 앞쪽이 이미 채워져 있으면(허용 오차 3일 안) 뒤쪽만
+  assert.deepEqual(backfillRanges('20251021', '20261021', { earliest: '20251023', latest: '20261020' }), [['20261019', '20261021']]);
+  assert.deepEqual(backfillRanges('20260722', '20261021', { earliest: '20260722', latest: '20260722' }), [['20260722', '20261021']]);
 });
 
 test('공시 제목 분류: 희석·주주환원·처분·정정·종속회사', () => {

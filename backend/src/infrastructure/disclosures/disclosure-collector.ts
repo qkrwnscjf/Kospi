@@ -3,7 +3,7 @@ import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsSe
 import { registerShutdown } from '../shutdown.js';
 import { DISCLOSURE_SCOPE, isTargetStock, type Disclosure } from '../../shared/disclosures.js';
 import { DART_KEY_ERRORS, DART_STATUS, DartApiError, DartClient, readDartConfig } from './dart-client.js';
-import { backfillStart, DETAIL_ENDPOINTS, mapListItem, sumAmountFields, toDartDate, type DisclosureBase } from './dart-disclosures.js';
+import { backfillRanges, DETAIL_ENDPOINTS, mapListItem, sumAmountFields, toDartDate, type DisclosureBase } from './dart-disclosures.js';
 import { safeLogList } from '../http-json.js';
 import { fetchDisclosureCoverage } from '../backend-coverage.js';
 
@@ -20,7 +20,8 @@ const readIntEnv = (name: string, fallback: number) => {
 };
 const ACTIVE_INTERVAL_MS = readIntEnv('DISCLOSURE_POLLING_INTERVAL_MS', 60_000);
 const IDLE_INTERVAL_MS = readIntEnv('DISCLOSURE_IDLE_INTERVAL_MS', 10 * 60_000);
-const BACKFILL_DAYS = Math.min(readIntEnv('DISCLOSURE_BACKFILL_DAYS', 90), 365);
+// 1년(화면의 "1년" 기간과 DB 보관 1년에 맞춤, T-79). 이미 저장된 기간은 건너뛴다 (SEC-014)
+const BACKFILL_DAYS = Math.min(readIntEnv('DISCLOSURE_BACKFILL_DAYS', 365), 365);
 const PAGE_COUNT = 100;
 const MAX_LIVE_PAGES = 5;                  // 한 주기에 최대 500건. 그 이상 밀리면 다음 주기에 이어서 받는다
 const MAX_BACKFILL_PAGES_PER_WINDOW = 400; // 과거 채우기 상한 (호출 수 보호, 3개월 유가증권 공시는 수백 쪽 이하로 추정)
@@ -317,12 +318,19 @@ async function backfill(client: DartClient): Promise<boolean> {
   const targetStart = toDartDate(daysAgo(BACKFILL_DAYS));
   const today = toDartDate(seoulDate());
   // 진단 모드(T-81)는 이미 저장된 기간도 전부 다시 확인한다 (1회용 검증 스위치)
-  const start = DIAGNOSE ? targetStart : backfillStart(targetStart, stored.coverage);
+  const ranges = DIAGNOSE ? [[targetStart, today] as [string, string]] : backfillRanges(targetStart, today, stored.coverage);
   const startedAt = Date.now();
   let total = 0;
-  for (let bgnDe = start; bgnDe <= today && !stopping; bgnDe = shiftDays(bgnDe, SEARCH_WINDOW_DAYS + 1)) {
-    const windowEnd = shiftDays(bgnDe, SEARCH_WINDOW_DAYS);
-    const endDe = windowEnd < today ? windowEnd : today;
+  // 3개월 창 목록 (회사 지정 없는 검색의 기간 제한)
+  const windows: [string, string][] = [];
+  for (const [from, to] of ranges) {
+    for (let bgn = from; bgn <= to; bgn = shiftDays(bgn, SEARCH_WINDOW_DAYS + 1)) {
+      const end = shiftDays(bgn, SEARCH_WINDOW_DAYS);
+      windows.push([bgn, end < to ? end : to]);
+    }
+  }
+  for (const [bgnDe, endDe] of windows) {
+    if (stopping) break;
     const items: DisclosureBase[] = [];
     const windowNos: string[] = [];
     for (let pageNo = 1; !stopping; pageNo += 1) {
@@ -345,7 +353,10 @@ async function backfill(client: DartClient): Promise<boolean> {
     logDiagnosis();
   }
   const storedText = stored.coverage ? `${stored.coverage.earliest}-${stored.coverage.latest}` : 'none';
-  console.log(`[dart] backfill done: ${total} disclosures from ${start} (target ${targetStart}, stored ${storedText}, ${DISCLOSURE_SCOPE}) in ${Math.round((Date.now() - startedAt) / 1000)}s, requests ${requestCount}`);
+  const rangeText = ranges.map(([from, to]) => `${from}-${to}`).join(',');
+  console.log(`[dart] backfill done: ${total} disclosures in ${rangeText} (target ${targetStart}, stored ${storedText}, ${DISCLOSURE_SCOPE}) in ${Math.round((Date.now() - startedAt) / 1000)}s, requests ${requestCount}`);
+  // 당일 누락 점검(B-26)의 기준: 이 시점까지 받은 오늘 공시 중 가장 늦은 접수번호. 이후 공시는 실시간 조회로 받아야 한다
+  liveBaseline = [...seen].filter(rceptNo => rceptNo.startsWith(today)).sort().pop() ?? `${today}000000`;
   return true;
 }
 
@@ -362,12 +373,56 @@ function retryDelay(error: unknown) {
 
 let backfilled = BACKFILL_DAYS <= 0;
 
+// ── 당일 누락 점검 (docs/BENCHMARK.md B-26 기준 4, 검증용 스위치 DISCLOSURE_SELF_CHECK=true) ──
+// DART의 오늘 전체 목록(유가증권)과 수집기가 받아서 보낸 접수번호를 비교한다. 보낸 공시는 DB Sink가 저장한다(B-26 기준 1).
+// 로그에는 건수와 빠진 접수번호 예시(공개 번호)만 남긴다.
+const SELF_CHECK = process.env.DISCLOSURE_SELF_CHECK === 'true';
+const SELF_CHECK_INTERVAL_MS = 30 * 60_000;
+let lastCheckAt = 0;
+let liveBaseline: string | null = null;
+
+async function fetchDayRceptNos(client: DartClient, day: string) {
+  const rceptNos: string[] = [];
+  for (let pageNo = 1; pageNo <= 50 && !stopping; pageNo += 1) {
+    const page = await fetchListPage(client, day, day, pageNo);
+    rceptNos.push(...page.rceptNos);
+    if (page.rawCount < PAGE_COUNT || pageNo >= page.totalPage) break;
+  }
+  return rceptNos;
+}
+
+function reportSelfCheck(day: string, source: string[]) {
+  const unique = [...new Set(source)];
+  const missing = unique.filter(rceptNo => !seen.has(rceptNo));
+  // 시작 후 실시간 조회로만 받았어야 하는 공시(시작 시 채우기 이후 접수분)
+  const liveSource = liveBaseline ? unique.filter(rceptNo => rceptNo > liveBaseline!) : [];
+  const liveMissing = liveSource.filter(rceptNo => !seen.has(rceptNo));
+  console.log(`[dart-check] ${JSON.stringify({
+    date: day,
+    sourceTotal: unique.length,
+    captured: unique.length - missing.length,
+    missing: missing.length,
+    live: { source: liveSource.length, captured: liveSource.length - liveMissing.length, baseline: liveBaseline },
+    missingSamples: missing.slice(0, 10),
+  })}`);
+}
+
 async function loop(client: DartClient) {
   if (stopping) return;
   let delay = isActiveHours() ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS;
   try {
     if (!backfilled) backfilled = await backfill(client);
-    await pollOnce(client);
+    if (SELF_CHECK && backfilled && Date.now() - lastCheckAt >= SELF_CHECK_INTERVAL_MS) {
+      // 당일 누락 점검(B-26): 오늘 전체 목록을 먼저 받고, 그다음 평소 조회를 한 뒤 비교한다.
+      // 목록이 조회보다 먼저라서, 목록에 있는 공시는 모두 이번 조회까지 받았어야 한다.
+      const day = toDartDate(seoulDate());
+      const source = await fetchDayRceptNos(client, day);
+      await pollOnce(client);
+      reportSelfCheck(day, source);
+      lastCheckAt = Date.now();
+    } else {
+      await pollOnce(client);
+    }
     consecutiveFailures = 0;
   } catch (error) {
     consecutiveFailures += 1;
