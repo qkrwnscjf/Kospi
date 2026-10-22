@@ -1,5 +1,6 @@
 import { FLOW_ROOMS } from './flows.js';
 import { DISCLOSURE_ROOM } from './disclosures.js';
+import { KRX_DAILY_KEYS } from './krx-indices.js';
 
 // Yahoo 심볼 표와 카테고리 표 (docs/Task_ORDER.md T-22)
 // 이전에는 yahoo-api.ts와 history.controller.ts에 따로 정의되어 있었다 (P-17).
@@ -47,7 +48,8 @@ export const NAVER_KEYS = ['VKOSPI', 'KRX_SEMI', 'KRX_IT', 'KRX_AUTO', 'KRX_BANK
 
 // 브라우저가 구독할 수 있는 심볼 (docs/security.md SEC-005). 이 목록에 없는 값으로는 방(room)을 만들지 않는다.
 // 증시 자금 흐름 방(`flows:KOSPI`, `flows:KOSDAQ`, 11단계)과 공시 방(`disclosures:KOSPI`, 12단계)도 포함한다.
-const SUBSCRIBABLE_SYMBOLS = new Set<string>([...YAHOO_KEYS, ...NAVER_KEYS, ...FLOW_ROOMS, DISCLOSURE_ROOM]);
+// KRX 일별 지수는 표(krx-indices.ts)에 있는 심볼 전체(VKOSPI·섹터 17종, D-66)를 허용한다.
+const SUBSCRIBABLE_SYMBOLS = new Set<string>([...YAHOO_KEYS, ...NAVER_KEYS, ...KRX_DAILY_KEYS, ...FLOW_ROOMS, DISCLOSURE_ROOM]);
 
 export const isSubscribableSymbol = (value: unknown): value is string =>
   typeof value === 'string' && SUBSCRIBABLE_SYMBOLS.has(value);

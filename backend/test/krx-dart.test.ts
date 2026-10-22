@@ -1,7 +1,7 @@
 // KRX 일별 지수(T-67)와 DART 공시(12단계) 테스트
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { KRX_DAILY_KEYS, isKrxDailySymbol, symbolForIndexName } from '../src/shared/krx-indices.js';
+import { KRX_DAILY_KEYS, KRX_SECTOR_KEYS, isKrxDailySymbol, symbolForIndexName } from '../src/shared/krx-indices.js';
 import { NAVER_KEYS, isSubscribableSymbol } from '../src/shared/symbols.js';
 import { closeTimestamp, combineCoverage, mapIndexRows, missingDates, parseKrxNumber, seoulWeekdays, FIELDS } from '../src/infrastructure/krx/krx-index-daily.js';
 import { backfillRanges } from '../src/infrastructure/disclosures/dart-disclosures.js';
@@ -11,9 +11,20 @@ import { classifyReport, mapListItem, parseAmount, sumAmountFields } from '../sr
 import { DartApiError, DartClient } from '../src/infrastructure/disclosures/dart-client.js';
 import { KrxApiError, KrxClient } from '../src/infrastructure/krx/krx-client.js';
 
-test('KRX 일별 지수 심볼은 기존 Naver 6종 심볼과 같다 (화면·구독 허용 목록 그대로 사용)', () => {
-  assert.deepEqual([...KRX_DAILY_KEYS].sort(), [...NAVER_KEYS].sort());
+test('KRX 일별 지수: 기존 Naver 6종을 모두 포함하고, 섹터 17종이며, 모두 구독 허용 목록에 있다 (D-66)', () => {
+  for (const key of NAVER_KEYS) assert.ok(KRX_DAILY_KEYS.includes(key), key);
+  assert.equal(KRX_SECTOR_KEYS.length, 17);
+  for (const key of KRX_DAILY_KEYS) {
+    assert.equal(isSubscribableSymbol(key), true, key);
+    assert.match(key, /^[A-Z0-9/_]{1,20}$/); // Kafka 메시지 검증(parseTick)의 심볼 형식
+  }
   assert.equal(isKrxDailySymbol('KOSPI'), false);
+});
+
+test('섹터 지수 이름은 KRX 응답 이름과 공백을 무시하고 맞는다', () => {
+  assert.equal(symbolForIndexName('krx', 'KRX 에너지화학'), 'KRX_ENERGY_CHEM');
+  assert.equal(symbolForIndexName('krx', 'KRX K콘텐츠'), 'KRX_KCONTENT');
+  assert.equal(symbolForIndexName('krx', 'KRX 300 정보기술'), undefined);
 });
 
 test('KRX 지수 이름은 공백·대소문자를 무시하고 엔드포인트별로 찾는다', () => {

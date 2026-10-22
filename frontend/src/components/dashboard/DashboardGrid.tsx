@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import { formatClock } from '@/lib/format'
 import { useConnectionStatus, useLastReceivedAt } from '@/hooks/useMarketData'
 import { DisclosureDashboard } from '@/components/disclosures/DisclosureDashboard'
+import { SectorNodes } from './SectorNodes'
 
 interface DashboardGridProps {
   categoryId: string
@@ -20,7 +21,7 @@ const categoryNames: Record<string, string> = {
 }
 
 const categoryDescriptions: Record<string, string> = {
-  category4: ' 국내 주요 섹터의 모멘텀을 한눈에 파악하고 비교할 수 있습니다. 섹터 지수는 KRX 일별 시세입니다.',
+  category4: ' KRX 섹터 지수 17종의 기간 수익률을 노드로 비교하고, 섹터별 추이를 확인합니다. 섹터 지수는 KRX 일별 시세입니다.',
   category5: ' 외국인·기관·개인 중 누가 사고 누가 파는지, 돈의 흐름을 보여 줍니다.',
   category6: ' 새 공시와 증자·사채 발행(희석), 자사주 취득·소각(주주환원) 규모를 보여 줍니다.',
 }
@@ -127,6 +128,9 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
       ) : categoryId === 'category6' ? (
         <DisclosureDashboard />
       ) : (
+      <>
+      {/* 국내 섹터 모멘텀: 위쪽에 섹터 수익률 노드 (D-66) */}
+      {categoryId === 'category4' && <SectorNodes />}
       <motion.div
         layout
         className={cn(
@@ -140,6 +144,7 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
           {charts.map((chart, index) => (
             <motion.div
               key={`${categoryId}-${chart.symbol}`}
+              id={`card-${chart.symbol}`}
               layout
               initial={{ opacity: 0, scale: 0.97 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -156,6 +161,7 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
           ))}
         </AnimatePresence>
       </motion.div>
+      </>
       )}
 
       <StatusFooter />

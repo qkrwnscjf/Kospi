@@ -13,11 +13,27 @@ export const KRX_DAILY_INDICES = {
   KRX_AUTO: { endpoint: 'krx', category: 'sector', names: ['KRX 자동차'] },
   KRX_BANK: { endpoint: 'krx', category: 'sector', names: ['KRX 은행'] },
   KRX_BIO: { endpoint: 'krx', category: 'sector', names: ['KRX 헬스케어'] },
+  // 섹터 확장 (D-66, 2026-10-22): KRX 시리즈 응답에서 이름을 확인한 섹터 지수 12종
+  KRX_ENERGY_CHEM: { endpoint: 'krx', category: 'sector', names: ['KRX 에너지화학'] },
+  KRX_STEEL: { endpoint: 'krx', category: 'sector', names: ['KRX 철강'] },
+  KRX_TELECOM: { endpoint: 'krx', category: 'sector', names: ['KRX 방송통신'] },
+  KRX_CONSTRUCTION: { endpoint: 'krx', category: 'sector', names: ['KRX 건설'] },
+  KRX_SECURITIES: { endpoint: 'krx', category: 'sector', names: ['KRX 증권'] },
+  KRX_MACHINERY: { endpoint: 'krx', category: 'sector', names: ['KRX 기계장비'] },
+  KRX_INSURANCE: { endpoint: 'krx', category: 'sector', names: ['KRX 보험'] },
+  KRX_TRANSPORT: { endpoint: 'krx', category: 'sector', names: ['KRX 운송'] },
+  KRX_CONS_DISC: { endpoint: 'krx', category: 'sector', names: ['KRX 경기소비재'] },
+  KRX_CONS_STAPLES: { endpoint: 'krx', category: 'sector', names: ['KRX 필수소비재'] },
+  KRX_KCONTENT: { endpoint: 'krx', category: 'sector', names: ['KRX K콘텐츠'] },
+  KRX_UTILITIES: { endpoint: 'krx', category: 'sector', names: ['KRX 유틸리티'] },
 } as const satisfies Record<string, { endpoint: KrxEndpoint; category: 'domestic' | 'sector'; names: readonly string[] }>;
 
 export type KrxDailySymbol = keyof typeof KRX_DAILY_INDICES;
 
 export const KRX_DAILY_KEYS = Object.keys(KRX_DAILY_INDICES) as KrxDailySymbol[];
+
+// 섹터 지수만 (화면의 섹터 수익률 노드, D-66)
+export const KRX_SECTOR_KEYS = KRX_DAILY_KEYS.filter(symbol => KRX_DAILY_INDICES[symbol].category === 'sector');
 
 export const isKrxDailySymbol = (value: unknown): value is KrxDailySymbol =>
   typeof value === 'string' && Object.prototype.hasOwnProperty.call(KRX_DAILY_INDICES, value);

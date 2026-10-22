@@ -4,7 +4,7 @@ import { dbPool } from '../../infrastructure/db.js';
 import { Latency } from '../../infrastructure/metrics.js';
 import { isSubscribableSymbol, isYahooSymbolKey } from '../../shared/symbols.js';
 import type { YahooSymbolKey } from '../../shared/symbols.js';
-import { isKrxDailySymbol, type KrxDailySymbol } from '../../shared/krx-indices.js';
+import { isKrxDailySymbol, KRX_SECTOR_KEYS, type KrxDailySymbol } from '../../shared/krx-indices.js';
 
 // 측정 지표 (docs/Task_ORDER.md T-01, BENCHMARK M-11)
 const historyDuration = new Latency('kospi_history_request_duration_seconds', 'History API response time by result (cache_hit / cache_miss / not_ready / error)');
@@ -63,6 +63,36 @@ async function getDailyIndexHistory(ticker: KrxDailySymbol, timeframe: Timeframe
   return rows;
 }
 
+// 섹터 기간 수익률 (D-66, 화면의 섹터 노드). 섹터마다 기간 안의 첫 종가 대비 마지막 종가.
+// 섹터 목록은 고정 표에서만 가져오고, 기간은 고정 표(DB_TIMEFRAMES)에서 고른다.
+const SECTOR_RETURNS_CACHE_TTL_S = 60;
+interface SectorReturn { symbol: string; returnPct: number | null; last: number; dayChangeRate: number; lastTime: number; points: number }
+
+export async function getSectorReturns(timeframe: Timeframe): Promise<SectorReturn[]> {
+  const { range } = DB_TIMEFRAMES[timeframe];
+  const { rows } = await dbPool.query<{ symbol: string; first: number; last: number; dayChangeRate: number; lastTime: number; points: number }>(
+    `SELECT symbol,
+            (array_agg(close ORDER BY time))[1] AS first,
+            (array_agg(close ORDER BY time DESC))[1] AS last,
+            (array_agg(change_rate ORDER BY time DESC))[1] AS "dayChangeRate",
+            (extract(epoch FROM max(time)) * 1000)::float8 AS "lastTime",
+            count(*)::int AS points
+     FROM index_daily
+     WHERE symbol = ANY($1::text[]) AND time >= now() - $2::interval
+     GROUP BY symbol`,
+    [KRX_SECTOR_KEYS, range]
+  );
+  // 점이 2개 미만이면 수익률을 0이 아니라 null(계산 불가)로 둔다
+  return rows.map(row => ({
+    symbol: row.symbol,
+    returnPct: row.points >= 2 && row.first > 0 ? (row.last / row.first - 1) * 100 : null,
+    last: row.last,
+    dayChangeRate: row.dayChangeRate,
+    lastTime: row.lastTime,
+    points: row.points,
+  }));
+}
+
 // 최근 tick (T-25). 시각은 소스 기준 시각(실시간 tick의 timestamp와 같은 기준)이다.
 async function getRecentTicks(ticker: YahooSymbolKey): Promise<HistoryPoint[]> {
   const { rows } = await dbPool.query<HistoryPoint>(
@@ -106,6 +136,31 @@ export const historyController = async (fastify: FastifyInstance) => {
       recentDuration.observe({ result: 'error' }, Date.now() - startedAt);
       console.error(`Error fetching recent ticks for ${ticker}:`, err);
       return reply.code(500).send({ error: 'Failed to fetch recent ticks' });
+    }
+  });
+
+  // 섹터 기간 수익률 (D-66). "1일"은 일별 시세로 계산할 수 없어 받지 않는다.
+  fastify.get('/api/v1/market/sector-returns', async (request, reply) => {
+    const startedAt = Date.now();
+    const { range } = request.query as { range?: string };
+    if (!range || range === '1일' || !isTimeframe(range)) {
+      return reply.code(400).send({ error: 'a valid range (1주, 1개월, 3개월, 1년) is required' });
+    }
+    try {
+      const cacheKey = `sector-returns:${range}`;
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        historyDuration.observe({ result: 'cache_hit' }, Date.now() - startedAt);
+        return JSON.parse(cached);
+      }
+      const payload = { range, data: await getSectorReturns(range) };
+      await redis.set(cacheKey, JSON.stringify(payload), 'EX', SECTOR_RETURNS_CACHE_TTL_S);
+      historyDuration.observe({ result: 'cache_miss' }, Date.now() - startedAt);
+      return payload;
+    } catch (err) {
+      historyDuration.observe({ result: 'error' }, Date.now() - startedAt);
+      console.error('Error fetching sector returns:', err);
+      return reply.code(500).send({ error: 'Failed to fetch sector returns' });
     }
   });
 
@@ -204,5 +259,20 @@ export function startHistorySelfCheck() {
       }
     }
     console.log(`[history-check] ${JSON.stringify({ results })}`);
+
+    // 섹터 수익률 (D-66): 섹터 수, 계산된 수, 최고·최저 수익률만 남긴다
+    try {
+      const sectors = await getSectorReturns('1개월');
+      const valid = sectors.filter(sector => sector.returnPct !== null).sort((a, b) => (b.returnPct ?? 0) - (a.returnPct ?? 0));
+      const round = (value: number | null | undefined) => (value === null || value === undefined ? null : Math.round(value * 100) / 100);
+      console.log(`[sector-check] ${JSON.stringify({
+        range: '1개월', sectors: sectors.length, withReturn: valid.length,
+        top: valid[0] ? { symbol: valid[0].symbol, returnPct: round(valid[0].returnPct) } : null,
+        bottom: valid.at(-1) ? { symbol: valid.at(-1)?.symbol, returnPct: round(valid.at(-1)?.returnPct) } : null,
+        minPoints: Math.min(...sectors.map(sector => sector.points)),
+      })}`);
+    } catch (error) {
+      console.error(`[sector-check] failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, 60000);
 }

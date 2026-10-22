@@ -46,5 +46,18 @@ export const CATEGORY_DATA: Record<string, ChartCardConfig[]> = {
     { title: 'KRX 자동차', symbol: 'KRX_AUTO', ready: true, decimals: 2, suffix: 'pt', daily: true },
     { title: 'KRX 은행', symbol: 'KRX_BANK', ready: true, decimals: 2, suffix: 'pt', daily: true },
     { title: 'KRX 헬스케어', symbol: 'KRX_BIO', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    // 섹터 확장 (D-66): KRX 섹터 지수 12종 (일별 시세)
+    { title: 'KRX 에너지화학', symbol: 'KRX_ENERGY_CHEM', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 철강', symbol: 'KRX_STEEL', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 방송통신', symbol: 'KRX_TELECOM', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 건설', symbol: 'KRX_CONSTRUCTION', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 증권', symbol: 'KRX_SECURITIES', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 기계장비', symbol: 'KRX_MACHINERY', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 보험', symbol: 'KRX_INSURANCE', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 운송', symbol: 'KRX_TRANSPORT', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 경기소비재', symbol: 'KRX_CONS_DISC', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 필수소비재', symbol: 'KRX_CONS_STAPLES', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX K콘텐츠', symbol: 'KRX_KCONTENT', ready: true, decimals: 2, suffix: 'pt', daily: true },
+    { title: 'KRX 유틸리티', symbol: 'KRX_UTILITIES', ready: true, decimals: 2, suffix: 'pt', daily: true },
   ],
 }
