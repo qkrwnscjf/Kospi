@@ -57,15 +57,41 @@ async function getCoverage() {
   return { since: rows[0]?.since ?? null, until: rows[0]?.until ?? null };
 }
 
+// 정정 사슬 묶기 (docs/Task_ORDER.md T-82, BENCHMARK B-30·B-34)
+// 같은 회사·같은 종류의 공시를 접수번호 순서로 놓고 "원 공시 1건 + 뒤따르는 정정 공시"를 한 사건으로 묶는다
+// (원 공시가 나올 때마다 사건 번호가 1 늘어남). 사건마다 금액이 있는 가장 늦은 공시(최종본)의 금액을 한 번만 센다.
+// 이유(B-30): 정정이 생기면 금액 API는 최종본만 돌려줘서 원 공시·중간 정정본은 금액이 비고, 최종본은 정정 공시라
+// 이전 규칙("정정 공시 제외")에서는 그 사건의 금액이 합계에서 통째로 빠졌다.
+// 사건 날짜는 사건의 첫 공시 접수일. 기간 경계에 걸친 사건을 바르게 묶으려고 CHAIN_LOOKBACK_DAYS만큼 더 앞에서부터 읽는다.
+const CHAIN_LOOKBACK_DAYS = 120;
+const eventsCte = (targetParam: number) => `
+  WITH base AS (
+    SELECT rcept_no, rcept_date, corp_code, corp_name, report_name, event_group, event_kind, is_correction, amount,
+           sum(CASE WHEN is_correction THEN 0 ELSE 1 END)
+             OVER (PARTITION BY corp_code, event_kind ORDER BY rcept_no ROWS UNBOUNDED PRECEDING) AS chain
+    FROM disclosures
+    WHERE event_group = ANY($2::text[]) AND rcept_date >= current_date - ($1::int + ${CHAIN_LOOKBACK_DAYS}) ${targetClause(targetParam)}
+  ),
+  events AS (
+    SELECT event_kind, min(event_group) AS event_group, min(rcept_date) AS event_date,
+           (array_agg(amount ORDER BY rcept_no DESC) FILTER (WHERE amount IS NOT NULL))[1] AS amount,
+           (array_agg(rcept_no ORDER BY rcept_no DESC))[1] AS latest_rcept_no,
+           (array_agg(rcept_date ORDER BY rcept_no DESC))[1] AS latest_date,
+           (array_agg(corp_name ORDER BY rcept_no DESC))[1] AS corp_name,
+           (array_agg(report_name ORDER BY rcept_no DESC))[1] AS report_name,
+           count(*)::int AS filings,
+           bool_or(is_correction) AS corrected
+    FROM base
+    GROUP BY corp_code, event_kind, chain
+  )`;
+
 async function getCapitalEvents(days: number, bucket: 'day' | 'week') {
-  const bucketExpr = bucket === 'day' ? 'rcept_date' : `time_bucket(INTERVAL '1 week', rcept_date)`;
-  const base = [days, CAPITAL_GROUPS];
-  // 정정 공시는 원 공시와 금액이 겹치므로 합계에서 뺀다
-  const where = `rcept_date >= current_date - $1::int AND event_group = ANY($2::text[]) AND NOT is_correction ${targetClause(3)}`;
-  const params = [...base, ...targetParams()];
+  const bucketExpr = bucket === 'day' ? 'event_date' : `time_bucket(INTERVAL '1 week', event_date)`;
+  const params = [days, CAPITAL_GROUPS, ...targetParams()];
 
   const buckets = await dbPool.query(
-    `SELECT to_char(${bucketExpr}, 'YYYY-MM-DD') AS "date",
+    `${eventsCte(3)}
+     SELECT to_char(${bucketExpr}, 'YYYY-MM-DD') AS "date",
             COALESCE(sum(amount) FILTER (WHERE event_group = 'dilution'), 0)::float8 AS "dilution",
             COALESCE(sum(amount) FILTER (WHERE event_group = 'shareholder_return'), 0)::float8 AS "shareholderReturn",
             COALESCE(sum(amount) FILTER (WHERE event_group = 'treasury_disposal'), 0)::float8 AS "treasuryDisposal",
@@ -73,14 +99,16 @@ async function getCapitalEvents(days: number, bucket: 'day' | 'week') {
             count(*) FILTER (WHERE event_group = 'shareholder_return')::int AS "shareholderReturnCount",
             count(*) FILTER (WHERE event_group = 'treasury_disposal')::int AS "treasuryDisposalCount",
             count(*) FILTER (WHERE amount IS NULL)::int AS "missingAmountCount"
-     FROM disclosures WHERE ${where}
+     FROM events WHERE event_date >= current_date - $1::int
      GROUP BY 1 ORDER BY 1`,
     params
   );
+  // 원문 링크는 사건의 최종본으로
   const top = await dbPool.query(
-    `SELECT rcept_no AS "rceptNo", to_char(rcept_date, 'YYYY-MM-DD') AS "rceptDate", corp_name AS "corpName",
-            report_name AS "reportName", event_group AS "group", event_kind AS "kind", amount
-     FROM disclosures WHERE ${where} AND amount IS NOT NULL
+    `${eventsCte(3)}
+     SELECT latest_rcept_no AS "rceptNo", to_char(latest_date, 'YYYY-MM-DD') AS "rceptDate", corp_name AS "corpName",
+            report_name AS "reportName", event_group AS "group", event_kind AS "kind", amount, corrected AS "isCorrection"
+     FROM events WHERE event_date >= current_date - $1::int AND amount IS NOT NULL
      ORDER BY amount DESC LIMIT 5`,
     params
   );
@@ -90,6 +118,49 @@ async function getCapitalEvents(days: number, bucket: 'day' | 'week') {
     [days]
   );
   return { buckets: buckets.rows, top: top.rows, since: coverage.rows[0]?.since ?? null };
+}
+
+// 검증용 자체 점검 (기존 스위치 HISTORY_SELF_CHECK=true일 때만, 기본 끔). T-82의 Before/After(B-34)를 같은 데이터로 비교한다.
+// 이전 규칙: 정정 공시를 빼고 공시 단위로 합산 / 새 규칙: 사건 단위로 최종본 금액 한 번. 로그에는 건수와 합계만 남긴다.
+export function startDisclosureSelfCheck() {
+  if (process.env.HISTORY_SELF_CHECK !== 'true') return;
+  const days = 365;
+  const params = [days, CAPITAL_GROUPS, ...targetParams()];
+  setInterval(async () => {
+    try {
+      const legacy = await dbPool.query(
+        `SELECT count(*)::int AS filings, count(amount)::int AS "withAmount",
+                COALESCE(sum(amount) FILTER (WHERE event_group = 'dilution'), 0)::float8 AS dilution,
+                COALESCE(sum(amount) FILTER (WHERE event_group = 'shareholder_return'), 0)::float8 AS "shareholderReturn",
+                COALESCE(sum(amount) FILTER (WHERE event_group = 'treasury_disposal'), 0)::float8 AS "treasuryDisposal"
+         FROM disclosures
+         WHERE rcept_date >= current_date - $1::int AND event_group = ANY($2::text[]) AND NOT is_correction ${targetClause(3)}`,
+        params
+      );
+      const events = await dbPool.query(
+        `${eventsCte(3)}
+         SELECT count(*)::int AS events, count(amount)::int AS "withAmount", count(*) FILTER (WHERE corrected)::int AS corrected,
+                sum(filings)::int AS filings,
+                COALESCE(sum(amount) FILTER (WHERE event_group = 'dilution'), 0)::float8 AS dilution,
+                COALESCE(sum(amount) FILTER (WHERE event_group = 'shareholder_return'), 0)::float8 AS "shareholderReturn",
+                COALESCE(sum(amount) FILTER (WHERE event_group = 'treasury_disposal'), 0)::float8 AS "treasuryDisposal",
+                count(*) FILTER (WHERE amount IS NULL AND event_kind = 'cancellation')::int AS "missingCancellation"
+         FROM events WHERE event_date >= current_date - $1::int`,
+        params
+      );
+      // 합계를 크게 바꾼 사건 확인용: 희석 금액 상위 5건(공개 회사명·최종 접수번호·금액·사건의 공시 수)
+      const topDilution = await dbPool.query(
+        `${eventsCte(3)}
+         SELECT latest_rcept_no AS "rceptNo", corp_name AS "corpName", event_kind AS kind, amount, filings, corrected
+         FROM events WHERE event_date >= current_date - $1::int AND event_group = 'dilution' AND amount IS NOT NULL
+         ORDER BY amount DESC LIMIT 5`,
+        params
+      );
+      console.log(`[disclosure-check] ${JSON.stringify({ range: '1년', legacy: legacy.rows[0], events: events.rows[0], topDilution: topDilution.rows })}`);
+    } catch (error) {
+      console.error(`[disclosure-check] failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, 60_000);
 }
 
 async function cached<T>(key: string, ttl: number, load: () => Promise<T>): Promise<{ value: T; hit: boolean }> {

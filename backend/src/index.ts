@@ -5,7 +5,7 @@ import fastifySocketIO from 'fastify-socket.io';
 import { initMarketGateway, stopMarketGateway } from './domains/market/market.gateway.js';
 import { historyController, startHistorySelfCheck } from './domains/history/history.controller.js';
 import { flowsController } from './domains/flows/flows.controller.js';
-import { disclosuresController } from './domains/disclosures/disclosures.controller.js';
+import { disclosuresController, startDisclosureSelfCheck } from './domains/disclosures/disclosures.controller.js';
 import { dbPool, initDB } from './infrastructure/db.js';
 import { redis } from './infrastructure/redis.js';
 import { metricsConfig, startMetricsLog, startMetricsServer } from './infrastructure/metrics.js';
@@ -62,6 +62,7 @@ const start = async () => {
     startMetricsLog('backend', metricsConfig.logIntervalMs);
     fastify.log.info(`Metrics server listening on :${metricsConfig.port} (internal only)`);
     startHistorySelfCheck();
+    startDisclosureSelfCheck();
 
     // 종료 처리 (docs/Task_ORDER.md T-28): 새 요청과 WebSocket을 먼저 닫고, Kafka 컨슈머 → Redis → DB 순서로 정리한다.
     registerShutdown('backend', [

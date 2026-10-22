@@ -6,6 +6,7 @@ import { NAVER_KEYS, isSubscribableSymbol } from '../src/shared/symbols.js';
 import { closeTimestamp, combineCoverage, mapIndexRows, missingDates, parseKrxNumber, seoulWeekdays, FIELDS } from '../src/infrastructure/krx/krx-index-daily.js';
 import { backfillRanges } from '../src/infrastructure/disclosures/dart-disclosures.js';
 import { DISCLOSURE_ROOM, parseDisclosure } from '../src/shared/disclosures.js';
+import { KOSPI100 } from '../src/shared/disclosure-targets.js';
 import { classifyReport, mapListItem, parseAmount, sumAmountFields } from '../src/infrastructure/disclosures/dart-disclosures.js';
 import { DartApiError, DartClient } from '../src/infrastructure/disclosures/dart-client.js';
 import { KrxApiError, KrxClient } from '../src/infrastructure/krx/krx-client.js';
@@ -142,6 +143,18 @@ test('공시 메시지 검증: 정상·금액 없음(null)은 통과, 형식이 
   assert.equal(reasonOf({ ...DISCLOSURE, corpName: 'a\u0000b' }), 'corp_name');
   const result = parseDisclosure(Buffer.from(JSON.stringify({ ...DISCLOSURE, filer: '홍길동' })));
   assert.equal(result.ok && 'filer' in result.disclosure, false);
+});
+
+// T-73: KOSPI 100 명단은 공식 출처로만 채운다. 채우면 기준일과 서로 다른 종목코드 100개가 있어야 한다 (형식이 틀리면 빌드 실패)
+test('KOSPI 100 명단 형식: 비어 있거나, 기준일 + 서로 다른 6자리 종목코드 100개', () => {
+  if (KOSPI100.codes.length === 0) {
+    assert.equal(KOSPI100.asOf, null);
+    return;
+  }
+  assert.match(KOSPI100.asOf ?? '', /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(KOSPI100.codes.length, 100);
+  assert.equal(new Set(KOSPI100.codes).size, 100);
+  for (const code of KOSPI100.codes) assert.match(code, /^[0-9A-Z]{6}$/);
 });
 
 test('공시 방은 구독 허용 목록에 있다', () => {

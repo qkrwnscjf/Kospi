@@ -143,7 +143,7 @@ function CapitalEventsCard({ range, setRange, buckets, top, since, status, weekl
     <div className={cn(cardClass, 'flex flex-col')}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-[13px] font-medium text-fg-muted">
-          자본 이벤트 금액 <span className="text-[11px]">(억원, {weekly ? '주별' : '일별'} 합계 · 정정 공시 제외)</span>
+          자본 이벤트 금액 <span className="text-[11px]">(억원, {weekly ? '주별' : '일별'} 합계 · 정정은 최종본 기준으로 한 번)</span>
         </h3>
       </div>
       <div className="mb-2 flex gap-1" role="group" aria-label="자본 이벤트 기간 선택">
@@ -198,7 +198,7 @@ function CapitalEventsCard({ range, setRange, buckets, top, since, status, weekl
         const missing = buckets.reduce((sum, bucket) => sum + bucket.missingAmountCount, 0)
         return (
           <p className="mt-1 text-[10px] text-fg-muted">
-            {missing > 0 ? `금액을 알 수 없는 공시 ${missing}건은 합계에 넣지 않았습니다. ` : ''}
+            {missing > 0 ? `금액을 알 수 없는 사건 ${missing}건(주식 소각 등)은 합계에 넣지 않았습니다. ` : ''}
             {since ? `${since} 이후 수집분 기준입니다.` : ''}
           </p>
         )
