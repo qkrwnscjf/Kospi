@@ -29,6 +29,17 @@ const CASES: [MarketId, string, boolean, string][] = [
   ['global_24h', '2026-10-17T16:00:00Z', false, '토 12:00 EDT'],
   ['global_24h', '2026-10-18T21:59:00Z', false, '일 17:59 EDT'],
   ['global_24h', '2026-10-18T22:00:00Z', true, '일 18:00 EDT (주간 개장)'],
+  // 도쿄(JST, UTC+9)·대만(UTC+8), 서머타임 없음 (D-67, T-105)
+  ['tokyo', '2026-10-16T00:00:00Z', true, '금 09:00 JST (개장)'],
+  ['tokyo', '2026-10-16T02:29:00Z', true, '금 11:29 JST'],
+  ['tokyo', '2026-10-16T02:30:00Z', false, '금 11:30 JST (점심 휴장)'],
+  ['tokyo', '2026-10-16T03:30:00Z', true, '금 12:30 JST (오후 개장)'],
+  ['tokyo', '2026-10-16T06:30:00Z', false, '금 15:30 JST (마감)'],
+  ['tokyo', '2026-10-17T01:00:00Z', false, '토 10:00 JST'],
+  ['taiwan', '2026-10-16T01:00:00Z', true, '금 09:00 대만 (개장)'],
+  ['taiwan', '2026-10-16T05:29:00Z', true, '금 13:29 대만'],
+  ['taiwan', '2026-10-16T05:30:00Z', false, '금 13:30 대만 (마감)'],
+  ['taiwan', '2026-10-16T00:59:00Z', false, '금 08:59 대만'],
 ];
 
 for (const [market, iso, expected, label] of CASES) {

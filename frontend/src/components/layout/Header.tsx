@@ -1,5 +1,5 @@
 import { cn } from '@/lib/utils'
-import { LayoutDashboard, Globe, TrendingUp, Activity, Terminal, Sun, Moon, ArrowLeftRight, FileText } from 'lucide-react'
+import { LayoutDashboard, Globe, TrendingUp, Activity, Terminal, Sun, Moon, ArrowLeftRight, FileText, Newspaper } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { useConnectionStatus, useLatestTick } from '@/hooks/useMarketData'
 import { useTheme } from '@/lib/theme'
@@ -18,6 +18,7 @@ const CATEGORIES = [
   { id: 'category4', name: '국내 섹터 모멘텀', icon: Activity },
   { id: 'category5', name: '증시 자금 흐름', icon: ArrowLeftRight }, // 11단계 (준비 중, D-55)
   { id: 'category6', name: '공시·자본 이벤트', icon: FileText }, // 12단계 (DART)
+  { id: 'category7', name: '시장 뉴스', icon: Newspaper }, // 15단계 (레이아웃 미리보기, 데이터 연결 전)
 ]
 
 interface SidebarProps {

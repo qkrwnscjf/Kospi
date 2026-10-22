@@ -7,7 +7,7 @@ import { parseInvestorFlow, type InvestorFlow } from '../../shared/flows.js';
 import { parseDisclosure, type Disclosure } from '../../shared/disclosures.js';
 import { isKrxDailySymbol } from '../../shared/krx-indices.js';
 import type { EachBatchPayload } from 'kafkajs';
-import { runBackfillOnce } from './backfill.js';
+import { runBackfillOnce, runDailyHistoryBackfill } from './backfill.js';
 import { registerShutdown } from '../shutdown.js';
 
 // DB 적재 컨슈머 (docs/Task_ORDER.md T-12, D-18)
@@ -37,6 +37,7 @@ const dbJobLastSuccessAge = new Gauge('kospi_db_job_last_success_age_seconds', '
 const dbJobFailures = new Gauge('kospi_db_job_failures', 'Total failures of each TimescaleDB job');
 const dbRawOldestAge = new Gauge('kospi_db_raw_oldest_age_seconds', 'Age of the oldest row in market_ticks (raw retention target: 3h, D-02)');
 const DB_SIZE_INTERVAL_MS = 5 * 60 * 1000;
+const DAILY_HISTORY_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // 11단계·12단계·T-67에서 추가한 테이블 (용량·청크·행 수 기록). 이름은 고정 목록이고 매개변수로만 SQL에 넘긴다.
 const EXTRA_TABLES = ['investor_flows', 'index_daily', 'disclosures'];
 const dbRows = new Gauge('kospi_db_rows', 'Row count of the smaller hypertables added in stages 11-12 (investor_flows, index_daily, disclosures)');
@@ -341,11 +342,18 @@ async function run() {
   console.log('DB sink consumer started.');
 
   // 최초 1회 과거 데이터 채우기 (T-19). 실시간 적재와 동시에 진행하고, 실패해도 적재는 계속한다 (다음 기동에서 다시 시도).
+  // 이어서 나중에 추가한 지표의 과거 일봉을 채운다 (T-104 ③). 집계를 다시 계산하지 않으므로 위 채우기의 결과와 무관하게 실행한다.
   runBackfillOnce()
     .catch(error => console.error(`Backfill failed: ${error instanceof Error ? error.message : String(error)}`))
+    .then(() => runDailyHistoryBackfill())
+    .catch(error => console.error(`Daily history backfill failed: ${error instanceof Error ? error.message : String(error)}`))
     .finally(() => void recordDbSize());
 
   setInterval(() => void recordDbSize(), DB_SIZE_INTERVAL_MS);
+  // 과거 일봉과 실시간 집계 사이의 빈 날을 주기적으로 다시 확인한다 (T-104 ③). 비어 있지 않으면 외부 호출 없음
+  setInterval(() => {
+    runDailyHistoryBackfill().catch(error => console.error(`Daily history backfill failed: ${error instanceof Error ? error.message : String(error)}`));
+  }, DAILY_HISTORY_INTERVAL_MS);
 
   // 종료 처리 (docs/Task_ORDER.md T-28): 컨슈머를 먼저 끊는다. kafkajs는 처리 중인 묶음이 끝날 때까지 기다린 뒤 그룹에서 나간다.
   // 커밋하지 못한 묶음은 다음 기동에서 다시 처리되고, 중복은 유니크 제약이 건너뛴다(at-least-once).

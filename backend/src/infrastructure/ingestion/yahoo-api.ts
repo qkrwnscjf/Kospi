@@ -4,6 +4,7 @@ import { Counter } from '../metrics.js';
 import { YAHOO_SYMBOLS, YAHOO_CATEGORY as CATEGORY_BY_KEY, YAHOO_KEYS } from '../../shared/symbols.js';
 import type { YahooSymbolKey } from '../../shared/symbols.js';
 import { isMarketState } from '../../shared/market-state.js';
+import { safeLogText } from '../http-json.js';
 
 const yahooFinance = new YahooFinance();
 
@@ -60,7 +61,8 @@ export async function fetchYahooData(): Promise<NormalizedMarketData[]> {
     // 매핑할 수 없는 심볼은 그대로 쓰지 않고 버린다. 잘못된 심볼이 Kafka와 DB에 들어가지 않게 하기 위함.
     if (!key) {
       unmappedSymbolTotal.inc();
-      console.warn(`Unmapped Yahoo symbol skipped: ${quote.symbol}`);
+      // 응답에서 온 문자열이라 제어 문자를 지우고 길이를 잘라 기록한다 (로그 위조 방지, SEC-015)
+      console.warn(`Unmapped Yahoo symbol skipped: ${safeLogText(quote.symbol, 30)}`);
       continue;
     }
     if (canonicalSymbol !== quote.symbol) {

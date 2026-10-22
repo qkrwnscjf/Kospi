@@ -3,7 +3,7 @@
 // 서버에 묻지 않고 브라우저의 Intl로 판단해서, 장 상태를 보여 주려고 요청이 늘지 않는다.
 // 공휴일은 시간표로 알 수 없어서, tick에 담겨 오는 소스 장 상태(marketState)와 함께 판단한다 (marketBadge, T-56).
 
-export type MarketId = 'krx' | 'us_equity' | 'global_24h'
+export type MarketId = 'krx' | 'us_equity' | 'global_24h' | 'tokyo' | 'taiwan'
 
 // 소스(Yahoo)의 장 상태 (backend/src/shared/market-state.ts와 같은 값)
 export type MarketState = 'PREPRE' | 'PRE' | 'REGULAR' | 'POST' | 'POSTPOST' | 'CLOSED'
@@ -46,6 +46,16 @@ export function isMarketOpen(market: MarketId, now: Date): boolean {
     // KOSPI, KOSDAQ: 월~금 09:00 ~ 15:30 (서울)
     const { day, minutes } = zonedClock(now, 'Asia/Seoul')
     return isWeekday(day) && minutes >= hm(9) && minutes < hm(15, 30)
+  }
+  if (market === 'tokyo') {
+    // NIKKEI: 월~금 09:00 ~ 11:30, 12:30 ~ 15:30 (도쿄, 점심 휴장)
+    const { day, minutes } = zonedClock(now, 'Asia/Tokyo')
+    return isWeekday(day) && ((minutes >= hm(9) && minutes < hm(11, 30)) || (minutes >= hm(12, 30) && minutes < hm(15, 30)))
+  }
+  if (market === 'taiwan') {
+    // TAIEX: 월~금 09:00 ~ 13:30 (타이베이)
+    const { day, minutes } = zonedClock(now, 'Asia/Taipei')
+    return isWeekday(day) && minutes >= hm(9) && minutes < hm(13, 30)
   }
   const { day, minutes } = zonedClock(now, 'America/New_York')
   if (market === 'us_equity') {

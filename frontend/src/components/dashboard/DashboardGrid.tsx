@@ -1,10 +1,11 @@
-import { CATEGORY_DATA } from '@/constants/data'
+import { CATEGORY_DATA, type ChartCardConfig } from '@/constants/data'
 import { ChartCard } from './ChartCard'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { formatClock } from '@/lib/format'
 import { useConnectionStatus, useLastReceivedAt } from '@/hooks/useMarketData'
 import { DisclosureDashboard } from '@/components/disclosures/DisclosureDashboard'
+import { NewsDashboard } from '@/components/news/NewsDashboard'
 import { SectorNodes } from './SectorNodes'
 
 interface DashboardGridProps {
@@ -18,12 +19,29 @@ const categoryNames: Record<string, string> = {
   category4: '국내 섹터 모멘텀',
   category5: '증시 자금 흐름',
   category6: '공시·자본 이벤트',
+  category7: '시장 뉴스',
 }
 
 const categoryDescriptions: Record<string, string> = {
+  category1: ' 코스피·코스닥·코스피 200과 대형주 3종의 실시간 시세, KRX 대표 지수의 일별 시세를 보여 줍니다.',
+  category2: ' 원화 환율, 미국 국채 금리와 장단기 금리차, 변동성 지수를 보여 줍니다.',
+  category3: ' 미국·아시아 주요 지수와 에너지·금속 원자재 선물을 보여 줍니다.',
   category4: ' KRX 섹터 지수 17종의 기간 수익률을 노드로 비교하고, 섹터별 추이를 확인합니다. 섹터 지수는 KRX 일별 시세입니다.',
   category5: ' 외국인·기관·개인 중 누가 사고 누가 파는지, 돈의 흐름을 보여 줍니다.',
   category6: ' 새 공시와 증자·사채 발행(희석), 자사주 취득·소각(주주환원) 규모를 보여 줍니다.',
+  category7: ' 국내·해외 공신력 있는 언론사의 증시·경제 기사 제목을 모아 원문으로 연결합니다.',
+}
+
+// 카드를 소분류(group)별로 묶는다. 처음 나온 순서를 지킨다 (T-108)
+function groupCharts(charts: ChartCardConfig[]) {
+  const groups: { name: string; charts: ChartCardConfig[] }[] = []
+  for (const chart of charts) {
+    const name = chart.group ?? ''
+    const found = groups.find(group => group.name === name)
+    if (found) found.charts.push(chart)
+    else groups.push({ name, charts: [chart] })
+  }
+  return groups
 }
 
 // 하단 상태 표시는 고정 문구가 아니라 실제 연결 상태와 마지막 수신 시각을 보여 준다 (T-33).
@@ -127,40 +145,55 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
         <FlowsPending />
       ) : categoryId === 'category6' ? (
         <DisclosureDashboard />
+      ) : categoryId === 'category7' ? (
+        <NewsDashboard />
       ) : (
       <>
       {/* 국내 섹터 모멘텀: 위쪽에 섹터 수익률 노드 (D-66) */}
       {categoryId === 'category4' && <SectorNodes />}
-      <motion.div
-        layout
-        className={cn(
-          'grid w-full gap-5',
-          categoryId === 'category4'
-            ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'
-            : 'grid-cols-1 md:grid-cols-2'
-        )}
-      >
-        <AnimatePresence mode="popLayout">
-          {charts.map((chart, index) => (
+      {/* 소분류(group)별로 제목을 달아 묶는다 (T-108). group이 없는 카테고리는 묶음 하나로 이전과 같다 */}
+      <div className="flex w-full flex-col gap-10">
+        {groupCharts(charts).map(group => (
+          <section key={`${categoryId}-${group.name}`} className="w-full" aria-label={group.name || undefined}>
+            {group.name && (
+              <h3 className="mb-4 flex items-center gap-2 text-[12px] font-semibold tracking-wide text-fg-muted">
+                {group.name}
+                <span className="text-[11px] font-normal">{group.charts.length}</span>
+              </h3>
+            )}
             <motion.div
-              key={`${categoryId}-${chart.symbol}`}
-              id={`card-${chart.symbol}`}
               layout
-              initial={{ opacity: 0, scale: 0.97 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.97 }}
-              transition={{
-                duration: 0.4,
-                delay: index * 0.04,
-                ease: [0.16, 1, 0.3, 1],
-              }}
-              className={cn(categoryId === 'category4' && index === 0 ? 'lg:col-span-2 lg:row-span-1' : '')}
+              className={cn(
+                'grid w-full gap-5',
+                categoryId === 'category4'
+                  ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'
+                  : 'grid-cols-1 md:grid-cols-2'
+              )}
             >
-              <ChartCard {...chart} />
+              <AnimatePresence mode="popLayout">
+                {group.charts.map((chart, index) => (
+                  <motion.div
+                    key={`${categoryId}-${chart.symbol}`}
+                    id={`card-${chart.symbol}`}
+                    layout
+                    initial={{ opacity: 0, scale: 0.97 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.97 }}
+                    transition={{
+                      duration: 0.4,
+                      delay: index * 0.04,
+                      ease: [0.16, 1, 0.3, 1],
+                    }}
+                    className={cn(categoryId === 'category4' && index === 0 ? 'lg:col-span-2 lg:row-span-1' : '')}
+                  >
+                    <ChartCard {...chart} />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
             </motion.div>
-          ))}
-        </AnimatePresence>
-      </motion.div>
+          </section>
+        ))}
+      </div>
       </>
       )}
 

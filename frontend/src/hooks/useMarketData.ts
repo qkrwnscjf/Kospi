@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { getConnectionStatus, getLastReceivedAt, subscribeStatus, subscribeTicks, type TickData } from '@/lib/marketSocket'
 import { appendPoint, mergePoints, type ChartPoint } from '@/lib/chartPoints'
+import { spreadValue } from '@/lib/spread'
 
 export type { ChartPoint }
 
@@ -27,12 +28,25 @@ export function useLatestTick(symbol: string, enabled = true) {
   return latest
 }
 
-export function useMarketData(symbol: string, timeframe: string, ready: boolean) {
+// 두 지표의 차이를 보여 주는 카드의 현재값 (T-107). 두 지표를 각각 구독하고 화면에서 계산한다(계산 지표의 구독 방은 없음).
+export function useSpreadTick(symbol: string, spread: { long: string; short: string } | undefined, enabled: boolean): TickData | null {
+  const long = useLatestTick(spread?.long ?? '', enabled && spread !== undefined)
+  const short = useLatestTick(spread?.short ?? '', enabled && spread !== undefined)
+  if (!spread || !long || !short) return null
+  const value = spreadValue(long, short)
+  const tick: TickData = { symbol, category: long.category, changeRate: 0, price: value.price, timestamp: value.timestamp }
+  if (value.changePrice !== undefined) tick.changePrice = value.changePrice
+  if (long.marketState !== undefined) tick.marketState = long.marketState
+  return tick
+}
+
+// live: false이면 이 심볼의 실시간 tick을 구독하지 않는다(계산 지표처럼 구독 방이 없는 경우, T-107)
+export function useMarketData(symbol: string, timeframe: string, ready: boolean, live = true) {
   const [chartData, setChartData] = useState<ChartPoint[]>([])
   const [status, setStatus] = useState<ChartStatus>(ready ? 'loading' : 'not_ready')
 
   // 현재가와 기준 시각은 타임프레임과 상관없이 실시간 값으로 표시한다 (소켓 1개를 공유하므로 추가 연결이 없음, T-24).
-  const latest = useLatestTick(symbol, ready)
+  const latest = useLatestTick(symbol, ready && live)
 
   useEffect(() => {
     if (!ready) {

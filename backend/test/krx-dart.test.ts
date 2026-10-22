@@ -32,7 +32,18 @@ test('KRX 지수 이름은 공백·대소문자를 무시하고 엔드포인트�
   assert.equal(symbolForIndexName('krx', 'krx반도체'), 'KRX_SEMI');
   assert.equal(symbolForIndexName('drvprod', '코스피 200 변동성지수'), 'VKOSPI');
   assert.equal(symbolForIndexName('krx', '코스피 200 변동성지수'), undefined);
-  assert.equal(symbolForIndexName('krx', 'KRX 300'), undefined);
+  assert.equal(symbolForIndexName('drvprod', 'KRX 300'), undefined);
+});
+
+test('국내 전광판 KRX 대표 지수 3종 (D-67): 섹터가 아니고, 이름이 정확히 같을 때만 맞는다', () => {
+  assert.equal(symbolForIndexName('krx', 'KRX 300'), 'KRX_300');
+  assert.equal(symbolForIndexName('krx', 'KRX 100'), 'KRX_100');
+  assert.equal(symbolForIndexName('krx', '코리아 밸류업 지수'), 'KRX_VALUEUP');
+  assert.equal(symbolForIndexName('krx', 'KRX 300 정보기술'), undefined);
+  for (const key of ['KRX_300', 'KRX_100', 'KRX_VALUEUP']) {
+    assert.equal(isKrxDailySymbol(key), true, key);
+    assert.equal(KRX_SECTOR_KEYS.includes(key as never), false, key);
+  }
 });
 
 test('KRX 숫자: 쉼표 제거, 빈 값·"-"는 0이 아니라 null', () => {
@@ -47,7 +58,7 @@ test('KRX 응답 행 → tick: 대상만 남기고, 종가가 없으면 버린�
   const rows = [
     { [FIELDS.name]: 'KRX 반도체', [FIELDS.close]: '4,321.10', [FIELDS.change]: '12.30', [FIELDS.changeRate]: '0.29' },
     { [FIELDS.name]: 'KRX 은행', [FIELDS.close]: '-', [FIELDS.change]: '-', [FIELDS.changeRate]: '-' },
-    { [FIELDS.name]: 'KRX 300', [FIELDS.close]: '1,500.00', [FIELDS.change]: '1', [FIELDS.changeRate]: '0.1' },
+    { [FIELDS.name]: 'KRX 300 정보기술', [FIELDS.close]: '1,500.00', [FIELDS.change]: '1', [FIELDS.changeRate]: '0.1' },
   ];
   const { ticks, invalid } = mapIndexRows('krx', '20261019', rows);
   assert.equal(ticks.length, 1);

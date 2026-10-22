@@ -8,6 +8,10 @@ export type KrxEndpoint = 'krx' | 'drvprod';
 // names: 응답의 지수 이름(IDX_NM) 후보. 공백·대소문자를 무시하고 비교한다.
 export const KRX_DAILY_INDICES = {
   VKOSPI: { endpoint: 'drvprod', category: 'domestic', names: ['코스피 200 변동성지수', '코스피200 변동성지수', 'VKOSPI'] },
+  // 국내 전광판 확장 (D-67, T-102): KRX 시리즈 응답에 이미 들어 있는 대표 지수 3종(추가 호출 없음)
+  KRX_VALUEUP: { endpoint: 'krx', category: 'domestic', names: ['코리아 밸류업 지수', '코리아밸류업지수', 'KOREA VALUE-UP INDEX'] },
+  KRX_300: { endpoint: 'krx', category: 'domestic', names: ['KRX 300'] },
+  KRX_100: { endpoint: 'krx', category: 'domestic', names: ['KRX 100'] },
   KRX_SEMI: { endpoint: 'krx', category: 'sector', names: ['KRX 반도체'] },
   KRX_IT: { endpoint: 'krx', category: 'sector', names: ['KRX 정보기술'] },
   KRX_AUTO: { endpoint: 'krx', category: 'sector', names: ['KRX 자동차'] },

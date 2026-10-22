@@ -5,20 +5,37 @@
 import type { YahooSymbolKey } from '../../shared/symbols.js';
 import type { MarketState } from '../../shared/market-state.js';
 
-export type MarketId = 'krx' | 'us_equity' | 'global_24h';
+export type MarketId = 'krx' | 'us_equity' | 'global_24h' | 'tokyo' | 'taiwan';
 
 // 지표별로 따르는 시장 (frontend/src/constants/data.ts의 market과 같다)
 export const YAHOO_MARKET: Record<YahooSymbolKey, MarketId> = {
   KOSPI: 'krx',
   KOSDAQ: 'krx',
+  KOSPI200: 'krx',
+  SAMSUNG: 'krx',
+  SK_HYNIX: 'krx',
+  HYUNDAI: 'krx',
   SP500: 'us_equity',
   NASDAQ: 'us_equity',
   SOX: 'us_equity',
   US10Y: 'us_equity',
+  US13W: 'us_equity',
+  US5Y: 'us_equity',
+  US30Y: 'us_equity',
+  VIX: 'us_equity',
+  DOW: 'us_equity',
+  RUSSELL: 'us_equity',
+  NIKKEI: 'tokyo',
+  TAIEX: 'taiwan',
   'USD/KRW': 'global_24h',
+  'JPY/KRW': 'global_24h',
+  'CNY/KRW': 'global_24h',
   DXY: 'global_24h',
   WTI: 'global_24h',
   COPPER: 'global_24h',
+  GOLD: 'global_24h',
+  BRENT: 'global_24h',
+  NATGAS: 'global_24h',
 };
 
 // open: 장중, holiday: 시간표상 장 시간인데 소스가 닫혀 있음(공휴일 등), closed: 장 시간 밖
@@ -89,6 +106,22 @@ export const MARKETS: { id: MarketId; isOpen: (now: Date) => boolean }[] = [
       if (day === 0) return minutes >= hm(18);
       if (day === 5) return minutes < hm(17);
       return true;
+    },
+  },
+  {
+    // NIKKEI: 월~금 09:00 ~ 11:30, 12:30 ~ 15:30 (도쿄, 점심 휴장). 서머타임 없음
+    id: 'tokyo',
+    isOpen: now => {
+      const { day, minutes } = zonedClock(now, 'Asia/Tokyo');
+      return isWeekday(day) && ((minutes >= hm(9) && minutes < hm(11, 30)) || (minutes >= hm(12, 30) && minutes < hm(15, 30)));
+    },
+  },
+  {
+    // TAIEX: 월~금 09:00 ~ 13:30 (타이베이). 서머타임 없음
+    id: 'taiwan',
+    isOpen: now => {
+      const { day, minutes } = zonedClock(now, 'Asia/Taipei');
+      return isWeekday(day) && minutes >= hm(9) && minutes < hm(13, 30);
     },
   },
 ];

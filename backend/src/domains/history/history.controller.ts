@@ -2,8 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { redis } from '../../infrastructure/redis.js';
 import { dbPool } from '../../infrastructure/db.js';
 import { Latency } from '../../infrastructure/metrics.js';
-import { isSubscribableSymbol, isYahooSymbolKey } from '../../shared/symbols.js';
-import type { YahooSymbolKey } from '../../shared/symbols.js';
+import { DERIVED_SPREADS, isDerivedSymbol, isSubscribableSymbol, isYahooSymbolKey, YAHOO_DAILY_SOURCE } from '../../shared/symbols.js';
+import type { DerivedSymbol, YahooSymbolKey } from '../../shared/symbols.js';
 import { isKrxDailySymbol, KRX_SECTOR_KEYS, type KrxDailySymbol } from '../../shared/krx-indices.js';
 
 // 측정 지표 (docs/Task_ORDER.md T-01, BENCHMARK M-11)
@@ -40,6 +40,29 @@ const HISTORY_CACHE_TTL_S = Number.parseInt(process.env.HISTORY_CACHE_TTL_S ?? '
 // DB 집계 조회 (T-20). B-06에서 Yahoo 직접 호출보다 약 6배 빠르고, "1일" 기간 오류와 0값이 없어서 채택했다.
 async function getHistory(ticker: YahooSymbolKey, timeframe: Timeframe): Promise<HistoryPoint[]> {
   const { view, range } = DB_TIMEFRAMES[timeframe];
+  // 1개월 ~ 1년(1일 봉): 나중에 추가한 지표는 집계가 시작되기 전 날짜를 과거 일봉(index_daily, source 'yahoo')으로 이어 붙인다 (T-104 ③).
+  // - 집계 첫날보다 이전 날짜만 붙이므로 같은 날짜가 두 번 나오지 않는다(집계가 있는 날은 집계가 우선).
+  // - 처음부터 수집한 지표는 일봉 행이 없어 결과가 이전과 같다.
+  // - 일봉 시각은 집계 버킷과 같은 기준(UTC 자정)으로 맞춘다. 1일·1주(5분·1시간 봉)는 해상도가 달라 붙이지 않는다.
+  if (view === 'market_1d') {
+    const { rows } = await dbPool.query<HistoryPoint>(
+      `WITH agg AS (
+         SELECT bucket, close FROM market_1d WHERE symbol = $1 AND bucket >= now() - $2::interval
+       )
+       SELECT (extract(epoch FROM t) * 1000)::float8 AS time, close::float8 AS value
+       FROM (
+         SELECT time_bucket(INTERVAL '1 day', d.time) AS t, d.close
+         FROM index_daily d
+         WHERE d.symbol = $1 AND d.source = $3 AND d.time >= now() - $2::interval
+           AND d.time < COALESCE((SELECT min(bucket) FROM agg), 'infinity'::timestamptz)
+         UNION ALL
+         SELECT bucket AS t, close FROM agg
+       ) merged
+       ORDER BY t`,
+      [ticker, range, YAHOO_DAILY_SOURCE]
+    );
+    return rows;
+  }
   const { rows } = await dbPool.query<HistoryPoint>(
     `SELECT (extract(epoch FROM bucket) * 1000)::float8 AS time, close::float8 AS value
      FROM ${view}
@@ -48,6 +71,18 @@ async function getHistory(ticker: YahooSymbolKey, timeframe: Timeframe): Promise
     [ticker, range]
   );
   return rows;
+}
+
+// 두 지표의 차이 (T-107, 미 장단기 금리차). 저장하지 않고 조회할 때 같은 버킷끼리 뺀다. 한쪽에만 있는 시각은 버린다.
+// 버킷 경계가 같은 집계(과거 일봉도 UTC 자정으로 맞춤)를 쓰므로 시각이 정확히 맞는다.
+async function getSpreadHistory(ticker: DerivedSymbol, timeframe: Timeframe): Promise<HistoryPoint[]> {
+  const { long, short } = DERIVED_SPREADS[ticker];
+  const [longPoints, shortPoints] = await Promise.all([getHistory(long, timeframe), getHistory(short, timeframe)]);
+  const shortByTime = new Map(shortPoints.map(point => [point.time, point.value]));
+  return longPoints.flatMap(point => {
+    const shortValue = shortByTime.get(point.time);
+    return shortValue === undefined ? [] : [{ time: point.time, value: Math.round((point.value - shortValue) * 10000) / 10000 }];
+  });
 }
 
 // KRX 일별 지수 (T-67): 하루 1개 값이라 1주 ~ 1년만 제공한다. "1일"은 일별 시세로 그릴 수 없어서 daily_only로 알린다.
@@ -178,8 +213,9 @@ export const historyController = async (fastify: FastifyInstance) => {
       historyDuration.observe({ result: 'not_ready' }, Date.now() - startedAt);
       return { ticker, timeframe, data: [], status: 'daily_only' };
     }
-    // 그 밖에 Yahoo 심볼이 없는 지표는 mock 대신 "준비 중"을 돌려준다 (R-04, T-20)
-    if (!daily && !isYahooSymbolKey(ticker)) {
+    // 그 밖에 Yahoo 심볼이 없는 지표는 mock 대신 "준비 중"을 돌려준다 (R-04, T-20). 계산 지표(T-107)는 아래에서 계산
+    const derived = isDerivedSymbol(ticker);
+    if (!daily && !derived && !isYahooSymbolKey(ticker)) {
       historyDuration.observe({ result: 'not_ready' }, Date.now() - startedAt);
       return { ticker, timeframe, data: [], status: 'not_ready' };
     }
@@ -192,7 +228,11 @@ export const historyController = async (fastify: FastifyInstance) => {
         return JSON.parse(cached);
       }
 
-      const data = daily ? await getDailyIndexHistory(ticker, timeframe) : await getHistory(ticker as YahooSymbolKey, timeframe);
+      const data = daily
+        ? await getDailyIndexHistory(ticker, timeframe)
+        : derived
+          ? await getSpreadHistory(ticker, timeframe)
+          : await getHistory(ticker as YahooSymbolKey, timeframe);
       const responsePayload = { ticker, timeframe, data };
       await redis.set(cacheKey, JSON.stringify(responsePayload), 'EX', HISTORY_CACHE_TTL_S);
 
@@ -208,7 +248,8 @@ export const historyController = async (fastify: FastifyInstance) => {
 
 // 검증용 자체 점검 (기본 끔). 에이전트는 curl이나 브라우저를 쓸 수 없어서, backend가 직접 조회한 결과를 요약 로그로 남긴다.
 // 캐시를 거치지 않으므로 조회 시간은 캐시 miss 때의 시간과 같다.
-const SELF_CHECK_TICKERS: YahooSymbolKey[] = ['KOSPI', 'SP500', 'USD/KRW'];
+// SAMSUNG·GOLD: 과거 일봉을 이어 붙이는 지표(T-104 ③)의 확인용
+const SELF_CHECK_TICKERS: YahooSymbolKey[] = ['KOSPI', 'SP500', 'USD/KRW', 'SAMSUNG', 'GOLD'];
 
 export function startHistorySelfCheck() {
   if (!HISTORY_SELF_CHECK) return;
@@ -256,6 +297,18 @@ export function startHistorySelfCheck() {
         });
       } catch (error) {
         results.push({ ticker, timeframe: 'recent', error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    // 계산 지표 (T-107): 점 수와 값 범위만 남긴다
+    for (const ticker of Object.keys(DERIVED_SPREADS) as DerivedSymbol[]) {
+      for (const timeframe of TIMEFRAMES) {
+        try {
+          const data = await getSpreadHistory(ticker, timeframe);
+          const values = data.map(point => point.value);
+          results.push({ ticker, timeframe, points: data.length, min: values.length ? Math.min(...values) : null, max: values.length ? Math.max(...values) : null });
+        } catch (error) {
+          results.push({ ticker, timeframe, error: error instanceof Error ? error.message : String(error) });
+        }
       }
     }
     console.log(`[history-check] ${JSON.stringify({ results })}`);

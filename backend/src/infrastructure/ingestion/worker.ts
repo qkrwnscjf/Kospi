@@ -235,7 +235,7 @@ let currentCycle: Promise<void> | undefined;
 
 // 시장 상태에 따라 기본 주기를 정한다 (T-07, D-16, T-56).
 // 하나라도 장중이면 활성 주기, 장중은 없고 휴장(시간표상 장 시간인데 소스가 닫힘)이 있으면 휴장 주기, 모두 닫혀 있으면 유휴 주기.
-// Yahoo는 요청 한 번에 10종을 돌려주므로 지표별로 다른 주기를 줄 수 없다.
+// Yahoo는 요청 한 번에 모든 지표를 돌려주므로 지표별로 다른 주기를 줄 수 없다.
 function baseInterval() {
   const now = new Date(Date.now() + MARKET_CLOCK_OFFSET_MS);
   const states = MARKETS.map(market => {

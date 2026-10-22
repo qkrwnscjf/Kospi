@@ -5,13 +5,15 @@ import { TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatAxisNumber, formatClock, formatDate, formatNumber } from '@/lib/format'
 import { isMarketOpen, marketBadge, type MarketId, type MarketState } from '@/lib/marketHours'
-import { useMarketData, type ChartStatus } from '@/hooks/useMarketData'
+import { useMarketData, useSpreadTick, type ChartStatus } from '@/hooks/useMarketData'
 import { periodDirection, type Direction } from '@/lib/chartPoints'
 import type { ChartCardConfig } from '@/constants/data'
 
 const TIME_RANGES = ['실시간', '1일', '1주', '1개월', '3개월', '1년']
 // 일별 시세 지표(T-67)는 하루 1개 값이라 실시간·1일 그래프가 없다
 const DAILY_RANGES = ['1주', '1개월', '3개월', '1년']
+// 계산 카드(T-107)는 서버가 집계끼리 계산하므로 실시간 그래프가 없다
+const SPREAD_RANGES = ['1일', '1주', '1개월', '3개월', '1년']
 
 // 데이터 신선도 표시 (docs/Task_ORDER.md T-27): 마지막 값의 소스 기준 시각이 지금으로부터 얼마나 지났는지.
 function formatAge(ms: number) {
@@ -88,12 +90,17 @@ const DIRECTION_ICON = { up: TrendingUp, down: TrendingDown, flat: Minus }
 // 그래프 선·채우기 색 (D-37): 상승 초록, 하락 빨강, 변화 없음은 본문색. 기간 방향은 lib/chartPoints.ts
 const CHART_COLOR: Record<Direction, string> = { up: 'text-up', down: 'text-down', flat: 'text-fg' }
 
-export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, market, delayMinutes, daily }: ChartCardConfig) {
-  const ranges = daily ? DAILY_RANGES : TIME_RANGES
-  const [activeRange, setActiveRange] = useState(daily ? '1개월' : '실시간')
-  const { latest, chartData, status } = useMarketData(symbol, activeRange, ready)
+export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, market, delayMinutes, daily, spread }: ChartCardConfig) {
+  const ranges = daily ? DAILY_RANGES : spread ? SPREAD_RANGES : TIME_RANGES
+  const [activeRange, setActiveRange] = useState(daily ? '1개월' : spread ? '1일' : '실시간')
+  const { latest: ownLatest, chartData, status } = useMarketData(symbol, activeRange, ready, !spread)
+  // 계산 카드는 두 지표의 최신 tick으로 현재값을 계산한다 (T-107)
+  const spreadLatest = useSpreadTick(symbol, spread, ready)
+  const latest = spread ? spreadLatest : ownLatest
 
-  const direction: Direction | null = latest ? (latest.changeRate > 0 ? 'up' : latest.changeRate < 0 ? 'down' : 'flat') : null
+  // 등락 방향: 계산 카드는 전일 대비 변화량(%p), 나머지는 등락률(%)
+  const change = spread ? latest?.changePrice : latest?.changeRate
+  const direction: Direction | null = latest && change !== undefined ? (change > 0 ? 'up' : change < 0 ? 'down' : 'flat') : null
   const DirectionIcon = direction ? DIRECTION_ICON[direction] : null
   const message = chartMessage(status, chartData.length, activeRange === '실시간')
   // SVG id에는 공백·괄호가 들어가면 안 되므로 심볼로 만든다 (T-35: 이전에는 제목을 써서 일부 카드에서 채우기가 적용되지 않았음)
@@ -144,11 +151,11 @@ export function ChartCard({ title, symbol, ready, decimals, prefix, suffix, mark
               {latest && (daily ? <span>기준일 {formatDate(latest.timestamp, true)}</span> : <Freshness timestamp={latest.timestamp} />)}
             </div>
           </div>
-          {latest && direction && DirectionIcon && (
+          {latest && change !== undefined && direction && DirectionIcon && (
             <div className={cn('flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold tabular-nums', DIRECTION_STYLE[direction])}>
               <DirectionIcon className="h-3 w-3" aria-hidden />
-              {/* 등락률은 모든 지표에서 % 단위다 (T-27, P-19) */}
-              {latest.changeRate > 0 ? '+' : ''}{latest.changeRate.toFixed(2)}%
+              {/* 등락률은 모든 지표에서 % 단위다 (T-27, P-19). 계산 카드는 변화량(%p) */}
+              {change > 0 ? '+' : ''}{change.toFixed(spread ? 3 : 2)}{spread ? '%p' : '%'}
             </div>
           )}
         </div>
