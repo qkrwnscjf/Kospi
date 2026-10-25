@@ -5,7 +5,6 @@ import { cn } from '@/lib/utils'
 import { formatClock } from '@/lib/format'
 import { useConnectionStatus, useLastReceivedAt } from '@/hooks/useMarketData'
 import { DisclosureDashboard } from '@/components/disclosures/DisclosureDashboard'
-import { NewsDashboard } from '@/components/news/NewsDashboard'
 import { SectorNodes } from './SectorNodes'
 import { MarketBreadthPanel } from './MarketBreadth'
 
@@ -20,7 +19,6 @@ const categoryNames: Record<string, string> = {
   category4: '국내 섹터 모멘텀',
   category5: '증시 자금 흐름',
   category6: '공시·자본 이벤트',
-  category7: '시장 뉴스',
 }
 
 const categoryDescriptions: Record<string, string> = {
@@ -30,7 +28,6 @@ const categoryDescriptions: Record<string, string> = {
   category4: ' KRX 섹터 지수 17종의 기간 수익률을 노드로 비교하고, 섹터별 추이를 확인합니다. 섹터 지수는 KRX 일별 시세입니다.',
   category5: ' 외국인·기관·개인 중 누가 사고 누가 파는지, 돈의 흐름을 보여 줍니다.',
   category6: ' 새 공시와 증자·사채 발행(희석), 자사주 취득·소각(주주환원) 규모를 보여 줍니다.',
-  category7: ' 국내·해외 공신력 있는 언론사의 증시·경제 기사 제목을 모아 원문으로 연결합니다.',
 }
 
 // 카드를 소분류(group)별로 묶는다. 처음 나온 순서를 지킨다 (T-108)
@@ -146,8 +143,6 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
         <FlowsPending />
       ) : categoryId === 'category6' ? (
         <DisclosureDashboard />
-      ) : categoryId === 'category7' ? (
-        <NewsDashboard />
       ) : (
       <>
       {/* 국내 섹터 모멘텀: 위쪽에 섹터 수익률 노드 (D-66) */}
