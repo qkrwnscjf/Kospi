@@ -283,7 +283,7 @@
     {
       "id": 23,
       "type": "stat",
-      "title": "외부 API 수집기 키 설정 (T-67 · 12단계 · 11단계)",
+      "title": "외부 API 수집기 키 설정 (T-67 · 12단계)",
       "description": "0이면 .env에 키가 없어 외부에 접속하지 않고 대기 중입니다.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "x": 0, "y": 66, "w": 8, "h": 5 },
@@ -293,8 +293,7 @@
       },
       "targets": [
         { "refId": "A", "legendFormat": "KRX", "expr": "max(kospi_krx_configured)" },
-        { "refId": "B", "legendFormat": "DART", "expr": "max(kospi_disclosure_configured)" },
-        { "refId": "C", "legendFormat": "KIS", "expr": "max(kospi_flows_configured)" }
+        { "refId": "B", "legendFormat": "DART", "expr": "max(kospi_disclosure_configured)" }
       ]
     },
     {
@@ -343,15 +342,14 @@
     {
       "id": 27,
       "type": "timeseries",
-      "title": "수집 마지막 성공 후 경과 (KRX · DART · KIS)",
-      "description": "DART는 평일 07~19시 1분, 그 밖 10분 주기. KRX는 30분 주기(일별 시세). KIS는 장중에만 조회합니다.",
+      "title": "수집 마지막 성공 후 경과 (KRX · DART)",
+      "description": "DART는 평일 07~19시 1분, 그 밖 10분 주기. KRX는 30분 주기(일별 시세).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "x": 12, "y": 71, "w": 12, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         { "refId": "A", "legendFormat": "KRX {{endpoint}}", "expr": "time() - kospi_krx_last_success_timestamp_seconds" },
-        { "refId": "B", "legendFormat": "DART", "expr": "time() - max(kospi_disclosure_last_success_timestamp_seconds)" },
-        { "refId": "C", "legendFormat": "KIS {{market}}", "expr": "time() - kospi_flows_last_success_timestamp_seconds" }
+        { "refId": "B", "legendFormat": "DART", "expr": "time() - max(kospi_disclosure_last_success_timestamp_seconds)" }
       ]
     },
     {
@@ -388,6 +386,31 @@
       "targets": [
         { "refId": "A", "legendFormat": "기준일 {{symbol}}", "expr": "kospi_krx_latest_trade_date" },
         { "refId": "B", "legendFormat": "행 {{relation}}", "expr": "kospi_db_rows" }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "시장 폭 전송 · 합계에서 뺀 종목 행 (하루, T-106)",
+      "description": "KRX 유가증권·코스닥 일별매매정보를 시장별 합계로 줄여 보낸 건수와, 값이 빠져 합계에서 뺀 종목 행 수입니다. 과거 채우기 때가 아니면 하루 1건 안팎입니다.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 92, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "전송 {{market}}", "expr": "sum by (market) (increase(kospi_krx_breadth_sent_total[1d]))" },
+        { "refId": "B", "legendFormat": "뺀 행 {{market}}", "expr": "sum by (market) (increase(kospi_krx_breadth_invalid_rows_total[1d]))" }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "DB 작업 지연 배수 (마지막 성공 후 경과 ÷ 주기)",
+      "description": "1 안팎이면 정상입니다. 3을 넘으면 'DB 집계·보관 작업 멈춤' 알림이 울립니다.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 92, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 2 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{exported_job}} {{job}}", "expr": "kospi_db_job_last_success_age_seconds / kospi_db_job_schedule_seconds" }
       ]
     }
   ]

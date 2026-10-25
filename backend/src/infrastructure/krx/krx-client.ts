@@ -12,7 +12,7 @@ import { fetchJson, HttpJsonError } from '../http-json.js';
 
 const BASE_URL = 'https://data-dbg.krx.co.kr/svc/apis';
 const REQUEST_TIMEOUT_MS = 10_000;
-const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 지수 일별 시세는 수십 KB 수준
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 지수 일별 시세는 수십 KB, 종목별 일별매매정보(T-106)는 약 1MB 이하(코스닥 약 1,800종목)
 
 export class KrxApiError extends Error {
   constructor(message: string, readonly status: number | undefined = undefined, readonly code: string | undefined = undefined) {

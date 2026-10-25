@@ -243,6 +243,28 @@ const MIGRATIONS: Migration[] = [
       `SELECT add_retention_policy('disclosures', drop_after => INTERVAL '1 year', if_not_exists => true)`,
     ],
   },
+  {
+    version: 7,
+    name: 'T-106 market_breadth (advancers / decliners / trading value per market per day)',
+    statements: [
+      // 시장 폭·거래대금 (docs/Task_ORDER.md T-106, D-67). 기존 테이블·집계는 건드리지 않는다.
+      // 시장별 하루 1행(종목 행은 저장하지 않음). 기준 시각은 KRX 일별 지수와 같은 15:30 KST.
+      `CREATE TABLE IF NOT EXISTS market_breadth (
+        time TIMESTAMPTZ NOT NULL,
+        market TEXT NOT NULL,
+        advancers INTEGER NOT NULL,
+        decliners INTEGER NOT NULL,
+        unchanged INTEGER NOT NULL,
+        stocks INTEGER NOT NULL,
+        trading_value DOUBLE PRECISION NOT NULL,
+        source TEXT NOT NULL
+      )`,
+      // 1년에 약 500행이라 청크 하나로 충분
+      `SELECT create_hypertable('market_breadth', 'time', chunk_time_interval => INTERVAL '365 days', if_not_exists => TRUE)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS market_breadth_market_time_key ON market_breadth (market, time)`,
+      `SELECT add_retention_policy('market_breadth', drop_after => INTERVAL '1 year', if_not_exists => true)`,
+    ],
+  },
 ];
 
 // 집계의 실제 저장 테이블(materialization hypertable)을 찾아 청크 간격을 바꾼다 (T-31).

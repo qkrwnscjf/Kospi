@@ -25,7 +25,7 @@ export interface HttpJsonResponse {
 }
 
 export interface FetchJsonInit {
-  method?: 'GET' | 'POST';  // POST는 KIS 토큰 발급에만 쓴다 (SEC-013)
+  method?: 'GET' | 'POST';  // 지금 수집기는 모두 GET만 쓴다. POST도 같은 보호(리다이렉트 거부·크기 상한)를 받는다
   headers?: Record<string, string>;
   body?: string;
   timeoutMs: number;

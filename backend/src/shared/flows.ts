@@ -1,13 +1,17 @@
-// 증시 자금 흐름: 시장별 투자자 순매수 (docs/Task_ORDER.md 11단계 A, D-47, D-53)
-// 소스별 어댑터가 이 공통 형식으로 정규화하고, Kafka `investor-flows`를 거쳐 DB·화면으로 간다.
-// 금액 단위는 소스 단위(백만원)를 그대로 쓴다. 화면에서 억원으로 바꾼다.
+// 증시 자금 흐름: 시장별 투자자 순매수 (docs/Task_ORDER.md 11단계 B′)
+// 수집기가 이 공통 형식으로 정규화하고, Kafka `investor-flows`를 거쳐 DB·화면으로 간다.
+// 지금은 연결된 수집기가 없다(소스는 11단계 B′에서 정함). 금액 단위는 백만원이고 화면에서 억원으로 바꾼다.
 
 export const FLOW_MARKETS = ['KOSPI', 'KOSDAQ'] as const;
 export type FlowMarket = (typeof FLOW_MARKETS)[number];
 
-// provisional: 장중 잠정치, final: 장 마감 후 확정치 (B단계)
+// provisional: 잠정치, final: 확정치
 export const FLOW_STATUSES = ['provisional', 'final'] as const;
 export type FlowStatus = (typeof FLOW_STATUSES)[number];
+
+// 허용하는 출처. 새 소스를 연결할 때 이 목록에 추가한다
+export const FLOW_SOURCES = ['krx'] as const;
+export type FlowSource = (typeof FLOW_SOURCES)[number];
 
 export interface InvestorFlow {
   market: FlowMarket;
@@ -16,13 +20,14 @@ export interface InvestorFlow {
   institutionNet: number;  // 기관계 순매수 금액 (백만원)
   individualNet: number;   // 개인 순매수 금액 (백만원)
   status: FlowStatus;
-  source: 'kis';
+  source: FlowSource;
   collectedAt?: number;
   producedAt?: number;
 }
 
 const MARKET_SET = new Set<string>(FLOW_MARKETS);
 const STATUS_SET = new Set<string>(FLOW_STATUSES);
+const SOURCE_SET = new Set<string>(FLOW_SOURCES);
 
 export const isFlowMarket = (value: unknown): value is FlowMarket => typeof value === 'string' && MARKET_SET.has(value);
 
@@ -58,12 +63,12 @@ export function parseInvestorFlow(value: Buffer | null): FlowParseResult {
   if (!isFiniteNumber(institutionNet)) return fail('institution_net');
   if (!isFiniteNumber(individualNet)) return fail('individual_net');
   if (typeof status !== 'string' || !STATUS_SET.has(status)) return fail('status');
-  if (source !== 'kis') return fail('source');
+  if (typeof source !== 'string' || !SOURCE_SET.has(source)) return fail('source');
   if (collectedAt !== undefined && !isPositiveNumber(collectedAt)) return fail('collected_at');
   if (producedAt !== undefined && !isPositiveNumber(producedAt)) return fail('produced_at');
 
   // 알려진 필드만 남긴다 (임의 필드가 브라우저까지 전달되지 않음)
-  const flow: InvestorFlow = { market, time, foreignNet, institutionNet, individualNet, status: status as FlowStatus, source };
+  const flow: InvestorFlow = { market, time, foreignNet, institutionNet, individualNet, status: status as FlowStatus, source: source as FlowSource };
   if (collectedAt !== undefined) flow.collectedAt = collectedAt as number;
   if (producedAt !== undefined) flow.producedAt = producedAt as number;
   return { ok: true, flow };

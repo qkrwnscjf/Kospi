@@ -4,12 +4,13 @@
 // KRX Open API의 알려진 형식을 따른 가정이다. 첫 응답에서 필드 이름(값 제외)을 한 번 로그로 남겨 확정한다.
 // 필드가 맞지 않으면 값을 0으로 채우지 않고 건너뛴다.
 
-import { KRX_DAILY_INDICES, symbolForIndexName, type KrxEndpoint, type KrxDailySymbol } from '../../shared/krx-indices.js';
+import { isKrxDailySymbol, KRX_DAILY_INDICES, symbolForIndexName, type KrxEndpoint, type KrxDailySymbol, type KrxHistorySymbol } from '../../shared/krx-indices.js';
 import type { TickData } from '../../shared/types.js';
 
 export const ENDPOINT_PATHS: Record<KrxEndpoint, string> = {
   krx: '/idx/krx_dd_trd',
   drvprod: '/idx/drvprod_dd_trd',
+  kospi: '/idx/kospi_dd_trd', // KOSPI 시리즈 일별 시세 (T-104 보완: 코스피 200 과거 일봉)
 };
 
 // 2026-10-21 실제 응답으로 확인: IDX_NM, CLSPRC_IDX, CMPPREVDD_IDX(전일 대비), FLUC_RT
@@ -52,6 +53,13 @@ export function seoulWeekdays(nowMs: number, days: number): string[] {
   return result;
 }
 
+// 서울 기준 오늘보다 이전의 평일만 (오늘 값은 아직 확정되지 않았거나 실시간 수집이 맡음).
+// 목록의 마지막 칸을 잘라 내는 방식은 주말에 금요일을 빠뜨리므로 날짜로 비교한다.
+export function pastSeoulWeekdays(nowMs: number, days: number): string[] {
+  const today = new Date(nowMs + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, '');
+  return seoulWeekdays(nowMs, days).filter(date => date < today);
+}
+
 // 과거 채우기에서 실제로 받을 날짜 (docs/security.md SEC-014)
 // - targetDates: 채우려는 날짜(YYYYMMDD, 오래된 날부터), coverage: 이미 저장된 범위(없으면 null = 전부 받음)
 // - 저장된 마지막 날짜 이후와, 저장된 첫 날짜 이전 중 목표 시작일에서 toleranceDays 넘게 비어 있는 부분만 받는다.
@@ -90,7 +98,7 @@ export function rowsOf(body: Record<string, unknown>): Record<string, unknown>[]
 // 순수 함수 (테스트 대상): 응답 행들 → 대상 지수의 tick. 대상이 아닌 지수는 버린다.
 export function mapIndexRows(endpoint: KrxEndpoint, basDd: string, rows: Record<string, unknown>[]) {
   const ticks: TickData[] = [];
-  const invalid: KrxDailySymbol[] = [];
+  const invalid: (KrxDailySymbol | KrxHistorySymbol)[] = [];
   const timestamp = closeTimestamp(basDd);
   for (const row of rows) {
     const name = row[FIELDS.name];
@@ -104,7 +112,9 @@ export function mapIndexRows(endpoint: KrxEndpoint, basDd: string, rows: Record<
       invalid.push(symbol);
       continue;
     }
-    const tick: TickData = { symbol, category: KRX_DAILY_INDICES[symbol].category, price, changeRate, timestamp };
+    // 과거 일봉 전용 심볼(코스피 200 등)은 국내 지표다
+    const category = isKrxDailySymbol(symbol) ? KRX_DAILY_INDICES[symbol].category : 'domestic';
+    const tick: TickData = { symbol, category, price, changeRate, timestamp };
     if (changePrice !== null) tick.changePrice = changePrice;
     ticks.push(tick);
   }

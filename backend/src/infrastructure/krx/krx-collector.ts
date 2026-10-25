@@ -1,11 +1,12 @@
 import { producer, TOPICS, ensureTopics } from '../kafka.js';
 import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsServer } from '../metrics.js';
 import { registerShutdown } from '../shutdown.js';
-import { KRX_DAILY_INDICES, KRX_DAILY_KEYS, type KrxEndpoint } from '../../shared/krx-indices.js';
-import { fetchDailyIndexCoverage } from '../backend-coverage.js';
+import { KRX_DAILY_INDICES, KRX_DAILY_KEYS, KRX_HISTORY_KEYS, type KrxEndpoint } from '../../shared/krx-indices.js';
+import { fetchBreadthCoverage, fetchDailyIndexCoverage } from '../backend-coverage.js';
 import type { TickData } from '../../shared/types.js';
 import { KrxApiError, KrxClient, readKrxConfig } from './krx-client.js';
-import { combineCoverage, ENDPOINT_PATHS, FIELDS, mapIndexRows, missingDates, rowsOf, seoulWeekdays } from './krx-index-daily.js';
+import { combineCoverage, ENDPOINT_PATHS, FIELDS, mapIndexRows, missingDates, pastSeoulWeekdays, rowsOf, seoulWeekdays } from './krx-index-daily.js';
+import { BREADTH_ENDPOINTS, summarizeBreadth, type BreadthEndpoint } from './krx-breadth.js';
 import { safeLogList } from '../http-json.js';
 
 // KRX 일별 지수 수집기 (docs/Task_ORDER.md T-67, D-60)
@@ -34,8 +35,15 @@ const configured = new Gauge('kospi_krx_configured', 'Whether the KRX API key is
 const lastSuccessAt = new Gauge('kospi_krx_last_success_timestamp_seconds', 'Unix time of the last successful KRX fetch, by endpoint');
 const latestTradeDate = new Gauge('kospi_krx_latest_trade_date', 'Latest trade date received (YYYYMMDD as a number), by symbol');
 
+// 시장 폭·거래대금 (T-106): 종목별 일별매매정보를 시장별 합계로 줄여 보낸다. 값이 하루 한 번 바뀌므로 최근 3일만 다시 확인한다
+const BREADTH_RECENT_DAYS = 3;
+const BREADTH_ENDPOINT_LIST = Object.keys(BREADTH_ENDPOINTS) as BreadthEndpoint[];
+const breadthSentTotal = new Counter('kospi_krx_breadth_sent_total', 'Market breadth summaries sent to Kafka by market');
+const breadthInvalidRows = new Counter('kospi_krx_breadth_invalid_rows_total', 'Stock rows left out of the breadth summary because a value was missing, by market');
+
 const lastSent = new Map<string, string>();
-const loggedFields = new Set<KrxEndpoint>();
+// 엔드포인트 이름: 지수(krx, drvprod, kospi)와 종목별 매매정보(stk, ksq)
+const loggedFields = new Set<string>();
 const loggedMissing = new Set<KrxEndpoint>();
 let stopping = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
@@ -44,12 +52,12 @@ let consecutiveFailures = 0;
 // 인증 거부(401/403)를 받은 엔드포인트는 한동안 호출하지 않는다 (키 미승인 상태에서 반복 호출 방지).
 // KRX Open API는 키 발급 후 서비스(API)별로 이용 신청·승인을 받아야 호출할 수 있다.
 const AUTH_RETRY_MS = 6 * 60 * 60_000;
-const disabledUntil = new Map<KrxEndpoint, number>();
-const backfilled = new Set<KrxEndpoint>();
+const disabledUntil = new Map<string, number>();
+const backfilled = new Set<string>();
 const unauthorized = new Counter('kospi_krx_unauthorized_total', 'KRX requests rejected as unauthorized (401/403), by endpoint');
 const RATE_LIMIT_RETRY_MS = 60 * 60_000;
 const rateLimited = new Counter('kospi_krx_rate_limited_total', 'KRX requests rejected by rate limit (429), by endpoint');
-const isEnabled = (endpoint: KrxEndpoint) => (disabledUntil.get(endpoint) ?? 0) <= Date.now();
+const isEnabled = (endpoint: string) => (disabledUntil.get(endpoint) ?? 0) <= Date.now();
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -106,24 +114,89 @@ async function collectDay(client: KrxClient, endpoint: KrxEndpoint, basDd: strin
     return true;
   } catch (error) {
     fetchDuration.observe({}, Date.now() - startedAt);
-    fetchTotal.inc({ endpoint, result: 'error' });
-    if (error instanceof KrxApiError && (error.status === 401 || error.status === 403)) {
-      unauthorized.inc({ endpoint });
-      disabledUntil.set(endpoint, Date.now() + AUTH_RETRY_MS);
-      console.warn(`[krx] ${endpoint} rejected as unauthorized (${describeError(error)}). ` +
-        `Check that this API service is approved for the key on the KRX Open API portal. Pausing this endpoint for ${AUTH_RETRY_MS / 3600_000}h.`);
-      return false;
-    }
-    // 호출 제한(429)이면 과거 채우기가 날짜마다 계속 호출하지 않도록 그 엔드포인트를 1시간 멈춘다
-    if (error instanceof KrxApiError && error.status === 429) {
-      rateLimited.inc({ endpoint });
-      disabledUntil.set(endpoint, Date.now() + RATE_LIMIT_RETRY_MS);
-      console.warn(`[krx] ${endpoint} rate limited (${describeError(error)}). Pausing this endpoint for ${RATE_LIMIT_RETRY_MS / 60_000}m.`);
-      return false;
-    }
-    console.warn(`[krx] ${endpoint} ${basDd} fetch failed: ${describeError(error)}`);
+    return handleFetchError(endpoint, basDd, error);
+  }
+}
+
+// 호출 실패 처리 (지수·종목별 매매정보 공통). 항상 false
+function handleFetchError(endpoint: string, basDd: string, error: unknown) {
+  fetchTotal.inc({ endpoint, result: 'error' });
+  if (error instanceof KrxApiError && (error.status === 401 || error.status === 403)) {
+    unauthorized.inc({ endpoint });
+    disabledUntil.set(endpoint, Date.now() + AUTH_RETRY_MS);
+    console.warn(`[krx] ${endpoint} rejected as unauthorized (${describeError(error)}). ` +
+      `Check that this API service is approved for the key on the KRX Open API portal. Pausing this endpoint for ${AUTH_RETRY_MS / 3600_000}h.`);
     return false;
   }
+  // 호출 제한(429)이면 과거 채우기가 날짜마다 계속 호출하지 않도록 그 엔드포인트를 1시간 멈춘다
+  if (error instanceof KrxApiError && error.status === 429) {
+    rateLimited.inc({ endpoint });
+    disabledUntil.set(endpoint, Date.now() + RATE_LIMIT_RETRY_MS);
+    console.warn(`[krx] ${endpoint} rate limited (${describeError(error)}). Pausing this endpoint for ${RATE_LIMIT_RETRY_MS / 60_000}m.`);
+    return false;
+  }
+  console.warn(`[krx] ${endpoint} ${basDd} fetch failed: ${describeError(error)}`);
+  return false;
+}
+
+// 시장 폭 (T-106): 한 날짜·한 시장의 종목별 매매정보를 받아 합계만 Kafka로 보낸다. 종목 행은 보내지 않는다. 성공하면 true
+async function collectBreadthDay(client: KrxClient, endpoint: BreadthEndpoint, basDd: string) {
+  const { path, market } = BREADTH_ENDPOINTS[endpoint];
+  const startedAt = Date.now();
+  try {
+    const body = await client.get(path, basDd);
+    fetchDuration.observe({}, Date.now() - startedAt);
+    const rows = rowsOf(body);
+    if (!loggedFields.has(endpoint) && rows[0]) {
+      loggedFields.add(endpoint);
+      console.log(`[krx] ${endpoint} response fields: ${safeLogList(Object.keys(rows[0]))} (${rows.length} rows)`);
+    }
+    if (rows.length === 0) {
+      fetchTotal.inc({ endpoint, result: 'empty' });
+      return true;
+    }
+    fetchTotal.inc({ endpoint, result: 'ok' });
+    lastSuccessAt.set({ endpoint }, Math.floor(Date.now() / 1000));
+
+    const { breadth, invalid } = summarizeBreadth(market, basDd, rows);
+    if (invalid > 0) breadthInvalidRows.inc({ market }, invalid);
+    if (!breadth) {
+      // 쓸 수 있는 종목 행이 하나도 없으면(필드 이름이 다를 때) 한 번만 알린다
+      if (!loggedFields.has(`${endpoint}:empty`)) {
+        loggedFields.add(`${endpoint}:empty`);
+        console.warn(`[krx] ${endpoint} ${basDd}: no usable stock rows among ${rows.length} (field mapping may differ)`);
+      }
+      return true;
+    }
+    const key = `breadth|${market}|${basDd}`;
+    const signature = `${breadth.advancers}|${breadth.decliners}|${breadth.unchanged}|${breadth.tradingValue}`;
+    if (lastSent.get(key) !== signature) {
+      await producer.send({
+        topic: TOPICS.breadth,
+        messages: [{ key: market, value: JSON.stringify({ ...breadth, collectedAt: startedAt, producedAt: Date.now() }) }],
+      });
+      lastSent.set(key, signature);
+      breadthSentTotal.inc({ market });
+    }
+    return true;
+  } catch (error) {
+    fetchDuration.observe({}, Date.now() - startedAt);
+    return handleFetchError(endpoint, basDd, error);
+  }
+}
+
+// 시장 폭 날짜들을 오래된 순서로 받는다. 거부된 엔드포인트는 건너뛴다
+async function collectBreadthDays(client: KrxClient, dates: string[], endpoints: BreadthEndpoint[]) {
+  let failures = 0;
+  for (const basDd of dates) {
+    for (const endpoint of endpoints) {
+      if (stopping) return failures === 0;
+      if (!isEnabled(endpoint)) continue;
+      if (!(await collectBreadthDay(client, endpoint, basDd))) failures += 1;
+      await sleep(REQUEST_GAP_MS);
+    }
+  }
+  return failures === 0;
 }
 
 // 날짜들을 오래된 순서로 받는다 (화면의 최신값이 마지막에 가장 최근 날짜로 남도록). 거부된 엔드포인트는 건너뛴다.
@@ -146,6 +219,7 @@ async function collectDays(client: KrxClient, dates: string[], endpoints: KrxEnd
 const ENDPOINT_SYMBOLS: Record<KrxEndpoint, string[]> = {
   krx: KRX_DAILY_KEYS.filter(symbol => KRX_DAILY_INDICES[symbol].endpoint === 'krx'),
   drvprod: KRX_DAILY_KEYS.filter(symbol => KRX_DAILY_INDICES[symbol].endpoint === 'drvprod'),
+  kospi: [...KRX_HISTORY_KEYS], // 과거 일봉 전용 (backfillHistory)
 };
 let loggedCoverageUnavailable = false;
 
@@ -182,9 +256,72 @@ async function backfill(client: KrxClient) {
   }
 }
 
+// Yahoo 지표의 과거 일봉 (T-104 보완): KOSPI 시리즈 일별 시세에서 코스피 200 종가를 받는다(index_daily에만 저장, 화면 tick 아님).
+// 실시간 집계가 시작되기 전 기간만 필요하므로 저장된 첫 날짜보다 앞쪽(과 저장이 없으면 1년 전체)만 받는다. 오늘은 실시간 수집이 맡는다.
+// 프로세스당 한 번만 하고, 저장 범위를 확인하지 못하면 다음 주기로 미룬다 (SEC-014).
+async function backfillHistory(client: KrxClient) {
+  const endpoint: KrxEndpoint = 'kospi';
+  if (BACKFILL_DAYS <= 0 || stopping || backfilled.has(endpoint) || !isEnabled(endpoint)) return;
+  const coverage = await fetchDailyIndexCoverage(ENDPOINT_SYMBOLS.kospi);
+  if (!coverage) return;
+  const target = pastSeoulWeekdays(Date.now(), BACKFILL_DAYS);
+  const stored = combineCoverage(ENDPOINT_SYMBOLS.kospi.map(symbol => coverage.get(symbol)));
+  const dates = missingDates(target, stored);
+  if (dates.length === 0) {
+    backfilled.add(endpoint);
+    console.log(`[krx] ${endpoint} history backfill skipped: already stored ${stored?.earliest}-${stored?.latest}`);
+    return;
+  }
+  const startedAt = Date.now();
+  const ok = await collectDays(client, dates, [endpoint]);
+  if (!isEnabled(endpoint)) return; // 거부되면 정지 시간이 지난 뒤 다시
+  backfilled.add(endpoint);
+  console.log(`[krx] ${endpoint} history backfill ${ok ? 'done' : 'finished with errors'}: ${dates.length} trade days in ${Math.round((Date.now() - startedAt) / 1000)}s`);
+}
+
+// 시장 폭 과거 채우기 (T-106): 지수와 같은 방식(빠진 기간만, 먼저 최근 1개 거래일로 인증 확인, 프로세스당 한 번)
+let loggedBreadthCoverageUnavailable = false;
+
+async function backfillBreadth(client: KrxClient) {
+  if (BACKFILL_DAYS <= BREADTH_RECENT_DAYS) return;
+  const pending = BREADTH_ENDPOINT_LIST.filter(endpoint => !backfilled.has(endpoint) && isEnabled(endpoint));
+  if (stopping || pending.length === 0) return;
+
+  const coverage = await fetchBreadthCoverage(pending.map(endpoint => BREADTH_ENDPOINTS[endpoint].market));
+  if (!coverage) {
+    if (!loggedBreadthCoverageUnavailable) console.warn('[krx] stored breadth range unavailable from backend; backfill postponed to the next cycle');
+    loggedBreadthCoverageUnavailable = true;
+    return;
+  }
+
+  const recent = seoulWeekdays(Date.now(), BREADTH_RECENT_DAYS);
+  const target = seoulWeekdays(Date.now(), BACKFILL_DAYS).slice(0, -recent.length);
+  for (const endpoint of pending) {
+    if (stopping) return;
+    const stored = coverage.get(BREADTH_ENDPOINTS[endpoint].market) ?? null;
+    const dates = missingDates(target, stored);
+    if (dates.length === 0) {
+      backfilled.add(endpoint);
+      console.log(`[krx] ${endpoint} breadth backfill skipped: already stored ${stored?.earliest}-${stored?.latest}`);
+      continue;
+    }
+    const probe = recent[recent.length - 1];
+    if (probe && !(await collectBreadthDay(client, endpoint, probe)) && !isEnabled(endpoint)) continue;
+    const startedAt = Date.now();
+    const ok = await collectBreadthDays(client, dates, [endpoint]);
+    if (!isEnabled(endpoint)) continue;
+    backfilled.add(endpoint);
+    console.log(`[krx] ${endpoint} breadth backfill ${ok ? 'done' : 'finished with errors'}: ${dates.length} of ${target.length} trade days (stored ${stored ? `${stored.earliest}-${stored.latest}` : 'none'}) in ${Math.round((Date.now() - startedAt) / 1000)}s`);
+  }
+}
+
 async function loop(client: KrxClient) {
   if (stopping) return;
   await backfill(client);
+  await backfillHistory(client);
+  await backfillBreadth(client);
+  // 시장 폭은 자체 정지(거부·제한)로 보호하므로, 결과를 지수 수집의 재시도 간격(백오프)에 섞지 않는다
+  await collectBreadthDays(client, seoulWeekdays(Date.now(), BREADTH_RECENT_DAYS), BREADTH_ENDPOINT_LIST);
   const ok = await collectDays(client, seoulWeekdays(Date.now(), RECENT_DAYS), ENDPOINTS);
   consecutiveFailures = ok ? 0 : consecutiveFailures + 1;
   const delay = consecutiveFailures === 0 ? POLLING_INTERVAL_MS : Math.min(POLLING_INTERVAL_MS * 2 ** consecutiveFailures, MAX_BACKOFF_MS);

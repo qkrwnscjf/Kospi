@@ -313,3 +313,67 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "DART 오늘 호출 수가 15,000회를 넘었습니다(한도 2만 건 추정). 재시작 반복이나 과거 채우기를 확인하세요."
+
+      # ── DB 집계·보관 작업 (docs/Task_ORDER.md 문제점 D3) ──
+      # 지표의 job 레이블은 Prometheus가 수집 대상 레이블과 충돌하면 exported_job으로 바꿀 수 있어서,
+      # 레이블 이름으로 거르지 않고 모든 작업을 대상으로 판단한다.
+
+      # 집계 갱신·보관 작업이 실패함 (TimescaleDB job_stats의 누적 실패 수가 늘어남)
+      - uid: kospi-db-job-failed
+        title: DB 집계·보관 작업 실패
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(clamp_min(delta(kospi_db_job_failures[1h]), 0)) or vector(0)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "최근 1시간 안에 TimescaleDB 집계 갱신 또는 보관 작업이 실패했습니다. Grafana의 '보관·갱신 작업 마지막 성공 후 경과' 패널과 DB 로그를 확인하세요."
+
+      # 집계 갱신·보관 작업이 주기의 3배 넘게 성공하지 못함 (멈춤)
+      - uid: kospi-db-job-stale
+        title: DB 집계·보관 작업 멈춤
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(kospi_db_job_last_success_age_seconds / kospi_db_job_schedule_seconds)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [3] }
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "TimescaleDB 집계 갱신 또는 보관 작업 중 하나가 주기의 3배가 넘도록 성공하지 못했습니다. 5분 봉 갱신이 멈추면 원본이 지워진 구간이 집계에서 빠질 수 있습니다."

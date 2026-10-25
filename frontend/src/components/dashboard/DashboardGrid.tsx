@@ -7,6 +7,7 @@ import { useConnectionStatus, useLastReceivedAt } from '@/hooks/useMarketData'
 import { DisclosureDashboard } from '@/components/disclosures/DisclosureDashboard'
 import { NewsDashboard } from '@/components/news/NewsDashboard'
 import { SectorNodes } from './SectorNodes'
+import { MarketBreadthPanel } from './MarketBreadth'
 
 interface DashboardGridProps {
   categoryId: string
@@ -23,7 +24,7 @@ const categoryNames: Record<string, string> = {
 }
 
 const categoryDescriptions: Record<string, string> = {
-  category1: ' 코스피·코스닥·코스피 200과 대형주 3종의 실시간 시세, KRX 대표 지수의 일별 시세를 보여 줍니다.',
+  category1: ' 코스피·코스닥·코스피 200과 대형주 3종의 실시간 시세, KRX 대표 지수의 일별 시세, 시장 폭(상승·하락 종목 수)과 거래대금을 보여 줍니다.',
   category2: ' 원화 환율, 미국 국채 금리와 장단기 금리차, 변동성 지수를 보여 줍니다.',
   category3: ' 미국·아시아 주요 지수와 에너지·금속 원자재 선물을 보여 줍니다.',
   category4: ' KRX 섹터 지수 17종의 기간 수익률을 노드로 비교하고, 섹터별 추이를 확인합니다. 섹터 지수는 KRX 일별 시세입니다.',
@@ -193,6 +194,8 @@ export function DashboardGrid({ categoryId }: DashboardGridProps) {
             </motion.div>
           </section>
         ))}
+        {/* 국내 전광판: 아래쪽에 시장 폭·거래대금 (T-106) */}
+        {categoryId === 'category1' && <MarketBreadthPanel />}
       </div>
       </>
       )}

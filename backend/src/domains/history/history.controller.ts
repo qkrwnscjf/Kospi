@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { redis } from '../../infrastructure/redis.js';
 import { dbPool } from '../../infrastructure/db.js';
 import { Latency } from '../../infrastructure/metrics.js';
-import { DERIVED_SPREADS, isDerivedSymbol, isSubscribableSymbol, isYahooSymbolKey, YAHOO_DAILY_SOURCE } from '../../shared/symbols.js';
+import { DERIVED_SPREADS, isDerivedSymbol, isSubscribableSymbol, isYahooSymbolKey } from '../../shared/symbols.js';
+import { BREADTH_MARKETS, type BreadthMarket } from '../../shared/breadth.js';
 import type { DerivedSymbol, YahooSymbolKey } from '../../shared/symbols.js';
 import { isKrxDailySymbol, KRX_SECTOR_KEYS, type KrxDailySymbol } from '../../shared/krx-indices.js';
 
@@ -40,7 +41,8 @@ const HISTORY_CACHE_TTL_S = Number.parseInt(process.env.HISTORY_CACHE_TTL_S ?? '
 // DB 집계 조회 (T-20). B-06에서 Yahoo 직접 호출보다 약 6배 빠르고, "1일" 기간 오류와 0값이 없어서 채택했다.
 async function getHistory(ticker: YahooSymbolKey, timeframe: Timeframe): Promise<HistoryPoint[]> {
   const { view, range } = DB_TIMEFRAMES[timeframe];
-  // 1개월 ~ 1년(1일 봉): 나중에 추가한 지표는 집계가 시작되기 전 날짜를 과거 일봉(index_daily, source 'yahoo')으로 이어 붙인다 (T-104 ③).
+  // 1개월 ~ 1년(1일 봉): 나중에 추가한 지표는 집계가 시작되기 전 날짜를 과거 일봉(index_daily)으로 이어 붙인다 (T-104 ③).
+  // 일봉 출처는 Yahoo(source 'yahoo') 또는 Yahoo가 주지 않는 지표의 KRX(source 'krx', 코스피 200)다. (symbol, time)이 유일해서 날짜당 1행.
   // - 집계 첫날보다 이전 날짜만 붙이므로 같은 날짜가 두 번 나오지 않는다(집계가 있는 날은 집계가 우선).
   // - 처음부터 수집한 지표는 일봉 행이 없어 결과가 이전과 같다.
   // - 일봉 시각은 집계 버킷과 같은 기준(UTC 자정)으로 맞춘다. 1일·1주(5분·1시간 봉)는 해상도가 달라 붙이지 않는다.
@@ -53,13 +55,13 @@ async function getHistory(ticker: YahooSymbolKey, timeframe: Timeframe): Promise
        FROM (
          SELECT time_bucket(INTERVAL '1 day', d.time) AS t, d.close
          FROM index_daily d
-         WHERE d.symbol = $1 AND d.source = $3 AND d.time >= now() - $2::interval
+         WHERE d.symbol = $1 AND d.time >= now() - $2::interval
            AND d.time < COALESCE((SELECT min(bucket) FROM agg), 'infinity'::timestamptz)
          UNION ALL
          SELECT bucket AS t, close FROM agg
        ) merged
        ORDER BY t`,
-      [ticker, range, YAHOO_DAILY_SOURCE]
+      [ticker, range]
     );
     return rows;
   }
@@ -126,6 +128,40 @@ export async function getSectorReturns(timeframe: Timeframe): Promise<SectorRetu
     lastTime: row.lastTime,
     points: row.points,
   }));
+}
+
+// 시장 폭·거래대금 (T-106): 시장별 일별 상승·하락·보합 종목 수와 거래대금(원). 기간은 고정 표(DB_TIMEFRAMES)에서 고른다.
+// coverage는 기간과 상관없이 시장별 저장된 첫·마지막 날짜(서울 기준)로, krx-collector가 빠진 기간만 채우는 데 쓴다 (SEC-014 방식).
+const BREADTH_CACHE_TTL_S = 60;
+interface BreadthPoint { time: number; advancers: number; decliners: number; unchanged: number; stocks: number; tradingValue: number }
+
+async function getBreadth(timeframe: Timeframe) {
+  const { range } = DB_TIMEFRAMES[timeframe];
+  const { rows } = await dbPool.query<BreadthPoint & { market: string }>(
+    `SELECT market, (extract(epoch FROM time) * 1000)::float8 AS time, advancers, decliners, unchanged, stocks,
+            trading_value::float8 AS "tradingValue"
+     FROM market_breadth
+     WHERE time >= now() - $1::interval
+     ORDER BY time`,
+    [range]
+  );
+  const coverageRows = await dbPool.query<{ market: string; since: string; until: string }>(
+    `SELECT market,
+            to_char(min(time) AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD') AS since,
+            to_char(max(time) AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD') AS until
+     FROM market_breadth
+     GROUP BY market`
+  );
+  const data = {} as Record<BreadthMarket, BreadthPoint[]>;
+  const coverage = {} as Record<BreadthMarket, { since: string; until: string } | null>;
+  for (const market of BREADTH_MARKETS) {
+    data[market] = rows.filter(row => row.market === market).map(row => ({
+      time: row.time, advancers: row.advancers, decliners: row.decliners, unchanged: row.unchanged, stocks: row.stocks, tradingValue: row.tradingValue,
+    }));
+    const found = coverageRows.rows.find(row => row.market === market);
+    coverage[market] = found ? { since: found.since, until: found.until } : null;
+  }
+  return { data, coverage };
 }
 
 // 최근 tick (T-25). 시각은 소스 기준 시각(실시간 tick의 timestamp와 같은 기준)이다.
@@ -196,6 +232,31 @@ export const historyController = async (fastify: FastifyInstance) => {
       historyDuration.observe({ result: 'error' }, Date.now() - startedAt);
       console.error('Error fetching sector returns:', err);
       return reply.code(500).send({ error: 'Failed to fetch sector returns' });
+    }
+  });
+
+  // 시장 폭·거래대금 (T-106). "1일"은 일별 값이라 받지 않는다.
+  fastify.get('/api/v1/market/breadth', async (request, reply) => {
+    const startedAt = Date.now();
+    const { range } = request.query as { range?: string };
+    if (!range || range === '1일' || !isTimeframe(range)) {
+      return reply.code(400).send({ error: 'a valid range (1주, 1개월, 3개월, 1년) is required' });
+    }
+    try {
+      const cacheKey = `breadth:${range}`;
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        historyDuration.observe({ result: 'cache_hit' }, Date.now() - startedAt);
+        return JSON.parse(cached);
+      }
+      const payload = { range, ...(await getBreadth(range)) };
+      await redis.set(cacheKey, JSON.stringify(payload), 'EX', BREADTH_CACHE_TTL_S);
+      historyDuration.observe({ result: 'cache_miss' }, Date.now() - startedAt);
+      return payload;
+    } catch (err) {
+      historyDuration.observe({ result: 'error' }, Date.now() - startedAt);
+      console.error('Error fetching market breadth:', err);
+      return reply.code(500).send({ error: 'Failed to fetch market breadth' });
     }
   });
 

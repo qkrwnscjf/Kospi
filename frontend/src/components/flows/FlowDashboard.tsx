@@ -10,7 +10,7 @@ import { useInvestorFlows, useLatestFlow } from '@/hooks/useInvestorFlows'
 import { useTokenColors } from '@/lib/theme'
 import type { ChartStatus } from '@/hooks/useMarketData'
 
-// 증시 자금 흐름 탭 (docs/Task_ORDER.md 11단계 A, D-46)
+// 증시 자금 흐름 탭 (docs/Task_ORDER.md 11단계 B′, D-46). 연결된 수집기가 없어 지금은 화면에 쓰지 않는다(FlowsPending)
 // - 위: "오늘의 수급" 시장 중심 흐름도 (순매도 그룹 → 시장 → 순매수 그룹)
 // - 아래: 투자자별 순매수 추이 (1일: 장중 누적 선, 1주 ~ 1년: 거래일별 막대)
 // 색은 흑백 토큰(D-35)과 등락 색(D-37)만 쓴다. 투자자는 선 모양·막대 농도로 구분한다.
@@ -219,7 +219,7 @@ export function FlowDashboard() {
         ))}
       </div>
       <p className="text-center text-[11px] text-fg-muted">
-        자료: 한국투자증권 Open API (시장별 투자자매매동향, 장중 잠정치). 장 마감 후 확정치는 다음 단계에서 반영됩니다.
+        자료 출처는 수집기를 연결할 때 표시합니다.
       </p>
     </div>
   )

@@ -2,9 +2,9 @@
 // 보류 중이던 Naver 6종(VKOSPI, KRX 섹터 5종)을 KRX Open API 일별 시세로 대체한다. 실시간이 아니라 하루 1개 값(종가)이다.
 // 내부 심볼은 기존과 같다(화면·구독 허용 목록·DB가 그대로 씀). 제공처 지수 이름은 이 표에만 둔다.
 
-export type KrxEndpoint = 'krx' | 'drvprod';
+export type KrxEndpoint = 'krx' | 'drvprod' | 'kospi';
 
-// endpoint: krx = KRX 시리즈 일별 시세, drvprod = 파생상품지수 일별 시세
+// endpoint: krx = KRX 시리즈 일별 시세, drvprod = 파생상품지수 일별 시세, kospi = KOSPI 시리즈 일별 시세(과거 일봉 전용, 아래 표)
 // names: 응답의 지수 이름(IDX_NM) 후보. 공백·대소문자를 무시하고 비교한다.
 export const KRX_DAILY_INDICES = {
   VKOSPI: { endpoint: 'drvprod', category: 'domestic', names: ['코스피 200 변동성지수', '코스피200 변동성지수', 'VKOSPI'] },
@@ -42,14 +42,33 @@ export const KRX_SECTOR_KEYS = KRX_DAILY_KEYS.filter(symbol => KRX_DAILY_INDICES
 export const isKrxDailySymbol = (value: unknown): value is KrxDailySymbol =>
   typeof value === 'string' && Object.prototype.hasOwnProperty.call(KRX_DAILY_INDICES, value);
 
+// Yahoo 실시간 지표의 과거 일봉을 KRX에서 받는 표 (docs/Task_ORDER.md T-104 보완, D-70)
+// Yahoo가 과거 일봉을 주지 않는 지표만 둔다. 실시간 값은 Yahoo가 주므로 화면 tick으로 보내지 않고(Gateway가 건너뜀)
+// index_daily에만 source 'krx'로 저장한다. History API가 1개월 ~ 1년 그래프에서 실시간 집계 앞에 이어 붙인다.
+// 내부 심볼은 Yahoo 표(symbols.ts)와 같다.
+export const KRX_HISTORY_INDICES = {
+  KOSPI200: { endpoint: 'kospi', names: ['코스피 200', '코스피200'] },
+} as const satisfies Record<string, { endpoint: KrxEndpoint; names: readonly string[] }>;
+
+export type KrxHistorySymbol = keyof typeof KRX_HISTORY_INDICES;
+
+export const KRX_HISTORY_KEYS = Object.keys(KRX_HISTORY_INDICES) as KrxHistorySymbol[];
+
+export const isKrxHistorySymbol = (value: unknown): value is KrxHistorySymbol =>
+  typeof value === 'string' && Object.prototype.hasOwnProperty.call(KRX_HISTORY_INDICES, value);
+
 export const normalizeIndexName = (name: string) => name.replace(/\s+/g, '').toUpperCase();
 
 // 정규화한 지수 이름 → 내부 심볼 (엔드포인트별)
-const NAME_LOOKUP = new Map<string, KrxDailySymbol>();
+const NAME_LOOKUP = new Map<string, KrxDailySymbol | KrxHistorySymbol>();
 for (const symbol of KRX_DAILY_KEYS) {
   const { endpoint, names } = KRX_DAILY_INDICES[symbol];
   for (const name of names) NAME_LOOKUP.set(`${endpoint}:${normalizeIndexName(name)}`, symbol);
 }
+for (const symbol of KRX_HISTORY_KEYS) {
+  const { endpoint, names } = KRX_HISTORY_INDICES[symbol];
+  for (const name of names) NAME_LOOKUP.set(`${endpoint}:${normalizeIndexName(name)}`, symbol);
+}
 
-export const symbolForIndexName = (endpoint: KrxEndpoint, name: string): KrxDailySymbol | undefined =>
+export const symbolForIndexName = (endpoint: KrxEndpoint, name: string): KrxDailySymbol | KrxHistorySymbol | undefined =>
   NAME_LOOKUP.get(`${endpoint}:${normalizeIndexName(name)}`);

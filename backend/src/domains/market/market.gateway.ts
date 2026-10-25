@@ -2,7 +2,7 @@ import { Server, Socket } from 'socket.io';
 import type { Consumer, EachMessagePayload, KafkaMessage } from 'kafkajs';
 import { flowRoom, isFlowMarket, parseInvestorFlow } from '../../shared/flows.js';
 import { DISCLOSURE_ROOM, isTargetStock, parseDisclosure } from '../../shared/disclosures.js';
-import { isKrxDailySymbol } from '../../shared/krx-indices.js';
+import { isKrxDailySymbol, isKrxHistorySymbol } from '../../shared/krx-indices.js';
 import { kafka, TOPICS, ensureTopics, sendToDlq } from '../../infrastructure/kafka.js';
 import { Counter, Gauge, Latency } from '../../infrastructure/metrics.js';
 import { marketService } from './market.service.js';
@@ -119,6 +119,8 @@ async function handleFlowMessage(io: Server, topic: string, partition: number, m
 // 소스 시각이 하루 전이라 지연 지표(e2e·pipeline)에는 넣지 않는다. 최신값 캐시는 더 새로운 날짜일 때만 바꾼다.
 async function handleIndexDailyMessage(io: Server, topic: string, partition: number, message: KafkaMessage) {
   const parsed = parseTick(message.value);
+  // Yahoo 지표의 과거 일봉(T-104 보완, 코스피 200 등)은 DB에만 저장한다. 실시간 값은 Yahoo tick이 주므로 화면에 보내지 않는다
+  if (parsed.ok && isKrxHistorySymbol(parsed.tick.symbol)) return;
   const reason = !parsed.ok ? parsed.reason : !isKrxDailySymbol(parsed.tick.symbol) ? 'not_daily_symbol' : undefined;
   if (reason || !parsed.ok) {
     invalidTotal.inc({ reason: `index_${reason ?? 'unknown'}` });

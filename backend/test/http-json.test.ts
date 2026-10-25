@@ -46,7 +46,7 @@ test('리다이렉트는 따라가지 않는다 (키가 다른 주소로 가지 
   assert.equal(followed, false);
 });
 
-test('POST(KIS 토큰 발급)도 307 리다이렉트를 따라가지 않아 본문(시크릿)이 다시 가지 않는다 (SEC-013)', async () => {
+test('POST도 307 리다이렉트를 따라가지 않아 본문(시크릿)이 다른 주소로 다시 가지 않는다', async () => {
   const received: string[] = [];
   await withServer((req, res) => {
     let body = '';

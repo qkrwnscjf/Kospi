@@ -133,9 +133,10 @@ export async function runBackfillOnce() {
 export async function runDailyHistoryBackfill() {
   for (const symbol of YAHOO_DAILY_HISTORY_KEYS) {
     const { rows: [state] } = await dbPool.query<{ last_daily: number | null; first_agg: number | null }>(
-      `SELECT (SELECT extract(epoch FROM max(time)) * 1000 FROM index_daily WHERE symbol = $1 AND source = $2)::float8 AS last_daily,
+      // 마지막 일봉은 출처와 상관없이 본다 (Yahoo가 주지 않는 지표는 KRX 일봉이 있다, T-104 보완)
+      `SELECT (SELECT extract(epoch FROM max(time)) * 1000 FROM index_daily WHERE symbol = $1)::float8 AS last_daily,
               (SELECT extract(epoch FROM min(bucket)) * 1000 FROM market_1d WHERE symbol = $1)::float8 AS first_agg`,
-      [symbol, YAHOO_DAILY_SOURCE]
+      [symbol]
     );
     if (!needsDailyHistory(state?.last_daily ?? null, state?.first_agg ?? null, Date.now())) continue;
     try {

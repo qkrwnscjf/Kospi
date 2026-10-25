@@ -44,6 +44,22 @@ export async function fetchDailyIndexCoverage(symbols: readonly string[]): Promi
   return result;
 }
 
+// 시장 폭 (T-106): 시장별 저장된 첫 날짜·마지막 날짜. 저장된 것이 없는 시장은 null, 확인하지 못하면 null.
+export async function fetchBreadthCoverage(markets: readonly string[]): Promise<Map<string, DateCoverage | null> | null> {
+  const body = await getJson(`/api/v1/market/breadth?range=${encodeURIComponent('1년')}`);
+  const coverage = body?.coverage;
+  if (!body || !coverage || typeof coverage !== 'object' || Array.isArray(coverage)) return null;
+  const result = new Map<string, DateCoverage | null>();
+  for (const market of markets) {
+    const item = (coverage as Record<string, unknown>)[market];
+    const { since, until } = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+    result.set(market, typeof since === 'string' && typeof until === 'string' && ISO_DATE.test(since) && ISO_DATE.test(until)
+      ? { earliest: since.replace(/-/g, ''), latest: until.replace(/-/g, '') }
+      : null);
+  }
+  return result;
+}
+
 // DART 공시: 저장된 첫 접수일·마지막 접수일. 저장된 것이 없으면 earliest/latest가 null인 객체, 확인하지 못하면 null.
 export async function fetchDisclosureCoverage(): Promise<{ coverage: DateCoverage | null } | null> {
   const body = await getJson('/api/v1/disclosures/recent?group=all');
