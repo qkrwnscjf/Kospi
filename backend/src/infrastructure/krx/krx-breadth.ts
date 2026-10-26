@@ -1,10 +1,11 @@
 // KRX 종목별 일별 매매정보 → 시장 폭·거래대금 요약 (docs/Task_ORDER.md T-106, D-67)
-// 순수 함수만 둔다(테스트 대상). 종목 행은 이 함수 밖으로 나가지 않는다(합계만 Kafka로 보냄).
+// 순수 함수만 둔다(테스트 대상). 시장 폭은 합계만 Kafka로 보낸다. 종목 행은 순위 상위 100개(T-113, D-72)만 밖으로 나간다.
 //
 // 응답 필드 (T-93에서 코스닥 응답으로 확인한 15개 항목: 기준일·종목코드·종목명·시장·소속부·종가·대비·등락률·시가·고가·저가·
 // 거래량·거래대금·시가총액·상장주식수). 영문 이름은 KRX Open API의 알려진 형식이며, 첫 응답에서 필드 이름(값 제외)을 한 번 기록해 확인한다.
 
 import type { BreadthMarket, MarketBreadth } from '../../shared/breadth.js';
+import { cleanStockName, RANKING_LIMIT, STOCK_CODE_PATTERN, type RankingEntry, type RankingType, type StockRankings } from '../../shared/rankings.js';
 import { closeTimestamp, parseKrxNumber } from './krx-index-daily.js';
 
 export type BreadthEndpoint = 'stk' | 'ksq';
@@ -20,7 +21,46 @@ export const STOCK_FIELDS = {
   change: 'CMPPREVDD_PRC',  // 대비
   changeRate: 'FLUC_RT',    // 등락률
   value: 'ACC_TRDVAL',      // 거래대금 (원)
+  // 종목 순위(T-113)에 쓰는 필드. 이름은 2026-10-23 실제 응답의 필드 이름 로그로 확인
+  code: 'ISU_CD',           // 종목코드
+  name: 'ISU_NM',           // 종목명
+  marketCap: 'MKTCAP',      // 시가총액 (원)
 } as const;
+
+// 종목 순위 (T-113): 4가지 순위의 상위 100개를 한 목록으로 합친다. 값이 없는 종목은 그 순위에서만 뺀다(0으로 채우지 않음).
+// 상승률은 양수만, 하락률은 음수만 센다(상승 종목이 100개보다 적으면 목록도 짧다). 같은 값이면 종목코드 순.
+export function rankStocks(market: BreadthMarket, basDd: string, rows: Record<string, unknown>[], limit = RANKING_LIMIT): StockRankings | null {
+  const stocks = rows.flatMap(row => {
+    const code = typeof row[STOCK_FIELDS.code] === 'string' ? (row[STOCK_FIELDS.code] as string).trim() : '';
+    const name = cleanStockName(row[STOCK_FIELDS.name]);
+    const close = parseKrxNumber(row[STOCK_FIELDS.close]);
+    if (!STOCK_CODE_PATTERN.test(code) || !name || close === null || close <= 0) return [];
+    const value = parseKrxNumber(row[STOCK_FIELDS.value]);
+    const cap = parseKrxNumber(row[STOCK_FIELDS.marketCap]);
+    return [{
+      code, name, close,
+      changeRate: parseKrxNumber(row[STOCK_FIELDS.changeRate]),
+      tradingValue: value !== null && value >= 0 ? value : null,
+      marketCap: cap !== null && cap > 0 ? cap : null,
+    }];
+  });
+
+  const byCode = new Map<string, RankingEntry>();
+  const assign = (type: RankingType, candidates: typeof stocks, score: (stock: (typeof stocks)[number]) => number) => {
+    [...candidates].sort((a, b) => score(b) - score(a) || a.code.localeCompare(b.code)).slice(0, limit).forEach((stock, index) => {
+      const entry = byCode.get(stock.code) ?? { ...stock, ranks: {} };
+      entry.ranks[type] = index + 1;
+      byCode.set(stock.code, entry);
+    });
+  };
+  assign('gain', stocks.filter(stock => stock.changeRate !== null && stock.changeRate > 0), stock => stock.changeRate!);
+  assign('loss', stocks.filter(stock => stock.changeRate !== null && stock.changeRate < 0), stock => -stock.changeRate!);
+  assign('value', stocks.filter(stock => stock.tradingValue !== null && stock.tradingValue > 0), stock => stock.tradingValue!);
+  assign('cap', stocks.filter(stock => stock.marketCap !== null), stock => stock.marketCap!);
+
+  if (byCode.size === 0) return null;
+  return { market, time: closeTimestamp(basDd), entries: [...byCode.values()] };
+}
 
 const sign = (value: number) => (value > 0 ? 1 : value < 0 ? -1 : 0);
 

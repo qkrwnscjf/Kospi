@@ -1,6 +1,8 @@
 import { cn } from '@/lib/utils'
-import { LayoutDashboard, Globe, TrendingUp, Activity, Terminal, Sun, Moon, ArrowLeftRight, FileText } from 'lucide-react'
+import { useState } from 'react'
+import { LayoutDashboard, Globe, TrendingUp, Activity, Terminal, Sun, Moon, ArrowLeftRight, FileText, Network, CalendarDays, ListOrdered, Settings } from 'lucide-react'
 import { motion } from 'framer-motion'
+import { SettingsPanel } from '@/components/settings/SettingsPanel'
 import { useConnectionStatus, useLatestTick } from '@/hooks/useMarketData'
 import { useTheme } from '@/lib/theme'
 import { formatNumber } from '@/lib/format'
@@ -18,6 +20,9 @@ const CATEGORIES = [
   { id: 'category4', name: '국내 섹터 모멘텀', icon: Activity },
   { id: 'category5', name: '증시 자금 흐름', icon: ArrowLeftRight }, // 11단계 (준비 중, D-55)
   { id: 'category6', name: '공시·자본 이벤트', icon: FileText }, // 12단계 (DART)
+  { id: 'category8', name: '실적·배당 캘린더', icon: CalendarDays }, // 15단계 T-111 (공시 탭 바로 아래)
+  { id: 'category9', name: '종목 순위', icon: ListOrdered }, // 15단계 T-113
+  { id: 'category7', name: '시장 연관성·리스크', icon: Network }, // 15단계 T-110 (일봉으로 계산)
 ]
 
 interface SidebarProps {
@@ -81,6 +86,21 @@ function ThemeToggle() {
   )
 }
 
+// 설정 창 열기 (15단계 T-112): 파이프라인 상태
+function SettingsButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label="설정 열기 (파이프라인 상태)"
+      title="설정 · 파이프라인 상태"
+      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-line bg-surface text-fg transition-colors hover:border-neon/50 hover:text-neon"
+    >
+      <Settings className="h-4 w-4" />
+    </button>
+  )
+}
+
 function Logo() {
   return (
     <div className="flex items-center gap-3">
@@ -99,6 +119,7 @@ export function Sidebar({ activeCategory, onCategoryChange }: SidebarProps) {
   // 공유 소켓으로 최신값만 받는다 (T-24)
   const kospi = useLatestTick('KOSPI')
   const usdKrw = useLatestTick('USD/KRW')
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   return (
     <aside className="sticky top-0 z-40 w-full border-b border-line bg-page/90 lg:h-screen lg:w-60 lg:shrink-0 lg:self-start lg:border-b-0 lg:border-r lg:bg-surface/60">
@@ -108,6 +129,7 @@ export function Sidebar({ activeCategory, onCategoryChange }: SidebarProps) {
           <Logo />
           <div className="flex items-center gap-3 lg:hidden">
             <ConnectionIndicator />
+            <SettingsButton onOpen={() => setSettingsOpen(true)} />
             <ThemeToggle />
           </div>
         </div>
@@ -156,10 +178,14 @@ export function Sidebar({ activeCategory, onCategoryChange }: SidebarProps) {
           </div>
           <div className="flex items-center justify-between">
             <ConnectionIndicator />
-            <ThemeToggle />
+            <div className="flex items-center gap-2">
+              <SettingsButton onOpen={() => setSettingsOpen(true)} />
+              <ThemeToggle />
+            </div>
           </div>
         </div>
       </div>
+      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
     </aside>
   )
 }

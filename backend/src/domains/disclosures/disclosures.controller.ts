@@ -4,6 +4,7 @@ import { dbPool } from '../../infrastructure/db.js';
 import { Latency } from '../../infrastructure/metrics.js';
 import { DISCLOSURE_SCOPE, isDisclosureGroup, targetStockCodes } from '../../shared/disclosures.js';
 import { KOSPI100 } from '../../shared/disclosure-targets.js';
+import { isCalendarDate, isCalendarMonth, nextDay, nextMonthStart } from '../../shared/disclosure-calendar.js';
 
 // 공시·자본 이벤트 조회 API (docs/Task_ORDER.md 12단계 T-77)
 // GET /api/v1/disclosures/recent?group=all|dilution|...      최근 공시 100건 (개수 고정)
@@ -120,6 +121,63 @@ async function getCapitalEvents(days: number, bucket: 'day' | 'week') {
   return { buckets: buckets.rows, top: top.rows, since: coverage.rows[0]?.since ?? null };
 }
 
+// 실적·배당 캘린더 (docs/Task_ORDER.md 15단계 T-111, D-72)
+// 이미 저장된 공시에서 잠정실적(earnings)·정기보고서(report)·배당 결정(dividend)을 날짜별로 모은다. 정정 공시는 빼고 원 공시만 센다.
+// 배당은 수집 때 따로 분류하지 않았으므로(기존 행은 'other') 조회할 때 제목으로 고른다. 다시 수집하지 않아도 1년치가 모두 보인다.
+// 예정 일정(앞으로의 실적 발표일 등)은 공시 본문에 있어서 다루지 않는다(본문 읽기는 D-63으로 중단).
+const CALENDAR_CACHE_TTL_S = 60;
+const CALENDAR_DAY_LIMIT = 1000;   // 정기보고서 마감일에는 하루 수백 건이라 상한을 둔다
+const CALENDAR_HIGHLIGHTS = 4;     // 달력 칸에 보여 줄 회사 수
+
+// 종류: 잠정실적 → earnings, 정기보고서 → report, 배당 결정(종속·자회사 제외) → dividend. 정정 제외
+const calendarTypeExpr = `CASE
+    WHEN event_kind = 'earnings' THEN 'earnings'
+    WHEN event_kind = 'periodic_report' THEN 'report'
+    WHEN regexp_replace(report_name, '\\s', '', 'g') LIKE '%배당결정%'
+         AND regexp_replace(report_name, '\\s', '', 'g') NOT LIKE '%자회사%'
+         AND regexp_replace(report_name, '\\s', '', 'g') NOT LIKE '%종속회사%' THEN 'dividend'
+  END`;
+const calendarBase = (targetParam: number) => `
+  SELECT rcept_no, rcept_date, stock_code, corp_name, report_name, ${calendarTypeExpr} AS cal_type
+  FROM disclosures
+  WHERE rcept_date >= $1::date AND rcept_date < $2::date AND NOT is_correction ${targetClause(targetParam)}`;
+
+// 달력의 한 달: 날짜별 종류별 건수와 대표 회사 몇 곳 (실적·배당을 정기보고서보다 먼저)
+async function getCalendarMonth(month: string) {
+  const start = `${month}-01`;
+  const { rows } = await dbPool.query(
+    `WITH base AS (${calendarBase(3)}),
+     typed AS (SELECT * FROM base WHERE cal_type IS NOT NULL),
+     ranked AS (
+       SELECT *, row_number() OVER (PARTITION BY rcept_date ORDER BY CASE cal_type WHEN 'report' THEN 1 ELSE 0 END, rcept_no) AS n
+       FROM typed
+     )
+     SELECT to_char(rcept_date, 'YYYY-MM-DD') AS "date",
+            count(*) FILTER (WHERE cal_type = 'earnings')::int AS earnings,
+            count(*) FILTER (WHERE cal_type = 'report')::int AS report,
+            count(*) FILTER (WHERE cal_type = 'dividend')::int AS dividend,
+            COALESCE(json_agg(json_build_object('corpName', corp_name, 'type', cal_type) ORDER BY n) FILTER (WHERE n <= ${CALENDAR_HIGHLIGHTS}), '[]') AS highlights
+     FROM ranked
+     GROUP BY rcept_date
+     ORDER BY rcept_date`,
+    [start, nextMonthStart(month), ...targetParams()]
+  );
+  return rows;
+}
+
+// 하루치 목록 (원문 링크용 접수번호 포함)
+async function getCalendarDay(date: string) {
+  const { rows } = await dbPool.query(
+    `WITH base AS (${calendarBase(3)})
+     SELECT rcept_no AS "rceptNo", stock_code AS "stockCode", corp_name AS "corpName", report_name AS "reportName", cal_type AS "type"
+     FROM base WHERE cal_type IS NOT NULL
+     ORDER BY CASE cal_type WHEN 'earnings' THEN 0 WHEN 'dividend' THEN 1 ELSE 2 END, rcept_no
+     LIMIT ${CALENDAR_DAY_LIMIT}`,
+    [date, nextDay(date), ...targetParams()]
+  );
+  return rows;
+}
+
 // 검증용 자체 점검 (기존 스위치 HISTORY_SELF_CHECK=true일 때만, 기본 끔). T-82의 Before/After(B-34)를 같은 데이터로 비교한다.
 // 이전 규칙: 정정 공시를 빼고 공시 단위로 합산 / 새 규칙: 사건 단위로 최종본 금액 한 번. 로그에는 건수와 합계만 남긴다.
 export function startDisclosureSelfCheck() {
@@ -160,6 +218,26 @@ export function startDisclosureSelfCheck() {
     } catch (error) {
       console.error(`[disclosure-check] failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+
+    // 실적·배당 캘린더 (T-111): 최근 12개월의 월별 종류별 합계와 조회 시간, 이번 달 가장 많은 날의 하루 목록 건수만 남긴다
+    try {
+      const months: Record<string, unknown>[] = [];
+      const now = new Date();
+      for (let back = 0; back < 12; back += 1) {
+        const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
+        const month = date.toISOString().slice(0, 7);
+        const startedAt = Date.now();
+        const days = await getCalendarMonth(month) as { date: string; earnings: number; dividend: number; report: number }[];
+        const sum = (key: 'earnings' | 'dividend' | 'report') => days.reduce((total, day) => total + day[key], 0);
+        months.push({ month, days: days.length, earnings: sum('earnings'), dividend: sum('dividend'), report: sum('report'), ms: Date.now() - startedAt });
+      }
+      const current = await getCalendarMonth(new Date().toISOString().slice(0, 7)) as { date: string; earnings: number; dividend: number; report: number }[];
+      const busiest = [...current].sort((a, b) => (b.earnings + b.dividend + b.report) - (a.earnings + a.dividend + a.report))[0];
+      const dayItems = busiest ? await getCalendarDay(busiest.date) : [];
+      console.log(`[calendar-check] ${JSON.stringify({ months, busiest: busiest ? { date: busiest.date, items: dayItems.length } : null })}`);
+    } catch (error) {
+      console.error(`[calendar-check] failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, 60_000);
 }
 
@@ -188,6 +266,29 @@ export const disclosuresController = async (fastify: FastifyInstance) => {
       requestDuration.observe({ endpoint: 'recent', result: 'error' }, Date.now() - startedAt);
       console.error('Error fetching recent disclosures:', err);
       return reply.code(500).send({ error: 'Failed to fetch disclosures' });
+    }
+  });
+
+  // 실적·배당 캘린더 (T-111): 한 달 요약 / 하루 목록. 월·날짜는 형식과 실제 날짜인지 검사한 뒤 매개변수로만 넘긴다.
+  fastify.get('/api/v1/disclosures/calendar', async (request, reply) => {
+    const startedAt = Date.now();
+    const { month, date } = request.query as { month?: string; date?: string };
+    if (date !== undefined) {
+      if (!isCalendarDate(date)) return reply.code(400).send({ error: 'date must be YYYY-MM-DD' });
+    } else if (!isCalendarMonth(month)) {
+      return reply.code(400).send({ error: 'month must be YYYY-MM' });
+    }
+    try {
+      const key = date !== undefined ? `disclosures:calendar:day:${date}` : `disclosures:calendar:month:${month}`;
+      const { value, hit } = await cached(key, CALENDAR_CACHE_TTL_S, async () => (date !== undefined
+        ? { date, limit: CALENDAR_DAY_LIMIT, ...scopeInfo(), items: await getCalendarDay(date) }
+        : { month, ...scopeInfo(), coverage: await getCoverage(), days: await getCalendarMonth(month!) }));
+      requestDuration.observe({ endpoint: date !== undefined ? 'calendar_day' : 'calendar_month', result: hit ? 'cache_hit' : 'cache_miss' }, Date.now() - startedAt);
+      return value;
+    } catch (err) {
+      requestDuration.observe({ endpoint: 'calendar', result: 'error' }, Date.now() - startedAt);
+      console.error('Error fetching disclosure calendar:', err);
+      return reply.code(500).send({ error: 'Failed to fetch disclosure calendar' });
     }
   });
 

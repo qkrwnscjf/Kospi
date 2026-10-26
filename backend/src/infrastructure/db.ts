@@ -265,6 +265,34 @@ const MIGRATIONS: Migration[] = [
       `SELECT add_retention_policy('market_breadth', drop_after => INTERVAL '1 year', if_not_exists => true)`,
     ],
   },
+  {
+    version: 8,
+    name: 'T-113 stock_rankings (top 100 by gain / loss / trading value / market cap per market per day)',
+    statements: [
+      // 종목 순위 (docs/Task_ORDER.md T-113, D-72). 기존 테이블·집계는 건드리지 않는다.
+      // 시장·날짜마다 4가지 순위의 상위 100개(합쳐 최대 400행). 순위에 들지 않으면 그 순위 칸은 NULL.
+      // 기준 시각은 시장 폭과 같은 15:30 KST. 하루에 최대 약 800행, 1년 약 20만 행(추정)이라 청크 30일.
+      `CREATE TABLE IF NOT EXISTS stock_rankings (
+        time TIMESTAMPTZ NOT NULL,
+        market TEXT NOT NULL,
+        code TEXT NOT NULL,
+        name TEXT NOT NULL,
+        close DOUBLE PRECISION NOT NULL,
+        change_rate DOUBLE PRECISION,
+        trading_value DOUBLE PRECISION,
+        market_cap DOUBLE PRECISION,
+        rank_gain SMALLINT,
+        rank_loss SMALLINT,
+        rank_value SMALLINT,
+        rank_cap SMALLINT,
+        source TEXT NOT NULL
+      )`,
+      `SELECT create_hypertable('stock_rankings', 'time', chunk_time_interval => INTERVAL '30 days', if_not_exists => TRUE)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS stock_rankings_market_code_time_key ON stock_rankings (market, code, time)`,
+      `CREATE INDEX IF NOT EXISTS stock_rankings_market_time_idx ON stock_rankings (market, time DESC)`,
+      `SELECT add_retention_policy('stock_rankings', drop_after => INTERVAL '1 year', if_not_exists => true)`,
+    ],
+  },
 ];
 
 // 집계의 실제 저장 테이블(materialization hypertable)을 찾아 청크 간격을 바꾼다 (T-31).

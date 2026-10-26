@@ -86,6 +86,8 @@ services:
       - DB_PASSWORD=password
       - DB_NAME=kospi
       - KAFKA_BROKERS=kafka:29092
+      # 파이프라인 상태(T-112)를 묻는 Prometheus 내부 주소. Docker 내부 네트워크만 쓰고, 정해진 쿼리만 보낸다.
+      - PROMETHEUS_URL=http://prometheus:9090
     # /api/health는 DB 스키마 생성(initDB) 후에 응답하므로, worker는 이 healthcheck를 기다린다 (T-29)
     # localhost는 Alpine wget에서 IPv6(::1)로 해석되는데 서버는 IPv4(0.0.0.0)에서만 대기하므로 127.0.0.1을 쓴다.
     healthcheck:

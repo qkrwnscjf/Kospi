@@ -2,11 +2,11 @@ import { producer, TOPICS, ensureTopics } from '../kafka.js';
 import { Counter, Gauge, Latency, metricsConfig, startMetricsLog, startMetricsServer } from '../metrics.js';
 import { registerShutdown } from '../shutdown.js';
 import { KRX_DAILY_INDICES, KRX_DAILY_KEYS, KRX_HISTORY_KEYS, type KrxEndpoint } from '../../shared/krx-indices.js';
-import { fetchBreadthCoverage, fetchDailyIndexCoverage } from '../backend-coverage.js';
+import { fetchBreadthCoverage, fetchDailyIndexCoverage, fetchRankingsCoverage } from '../backend-coverage.js';
 import type { TickData } from '../../shared/types.js';
 import { KrxApiError, KrxClient, readKrxConfig } from './krx-client.js';
 import { combineCoverage, ENDPOINT_PATHS, FIELDS, mapIndexRows, missingDates, pastSeoulWeekdays, rowsOf, seoulWeekdays } from './krx-index-daily.js';
-import { BREADTH_ENDPOINTS, summarizeBreadth, type BreadthEndpoint } from './krx-breadth.js';
+import { BREADTH_ENDPOINTS, rankStocks, summarizeBreadth, type BreadthEndpoint } from './krx-breadth.js';
 import { safeLogList } from '../http-json.js';
 
 // KRX 일별 지수 수집기 (docs/Task_ORDER.md T-67, D-60)
@@ -40,6 +40,8 @@ const BREADTH_RECENT_DAYS = 3;
 const BREADTH_ENDPOINT_LIST = Object.keys(BREADTH_ENDPOINTS) as BreadthEndpoint[];
 const breadthSentTotal = new Counter('kospi_krx_breadth_sent_total', 'Market breadth summaries sent to Kafka by market');
 const breadthInvalidRows = new Counter('kospi_krx_breadth_invalid_rows_total', 'Stock rows left out of the breadth summary because a value was missing, by market');
+// 종목 순위 (T-113): 같은 응답에서 상위 100개만 보낸다
+const rankingsSentTotal = new Counter('kospi_krx_rankings_sent_total', 'Stock ranking sets (one market-day) sent to Kafka by market');
 
 const lastSent = new Map<string, string>();
 // 엔드포인트 이름: 지수(krx, drvprod, kospi)와 종목별 매매정보(stk, ksq)
@@ -178,6 +180,21 @@ async function collectBreadthDay(client: KrxClient, endpoint: BreadthEndpoint, b
       lastSent.set(key, signature);
       breadthSentTotal.inc({ market });
     }
+
+    // 종목 순위 (T-113): 같은 응답에서 4가지 순위의 상위 100개만 보낸다(추가 호출 없음). 바뀐 날만 보낸다
+    const rankings = rankStocks(market, basDd, rows);
+    if (rankings) {
+      const rankKey = `rankings|${market}|${basDd}`;
+      const rankSignature = rankings.entries.map(entry => `${entry.code}:${entry.close}:${entry.changeRate}`).join(',');
+      if (lastSent.get(rankKey) !== rankSignature) {
+        await producer.send({
+          topic: TOPICS.rankings,
+          messages: [{ key: market, value: JSON.stringify({ ...rankings, collectedAt: startedAt, producedAt: Date.now() }) }],
+        });
+        lastSent.set(rankKey, rankSignature);
+        rankingsSentTotal.inc({ market });
+      }
+    }
     return true;
   } catch (error) {
     fetchDuration.observe({}, Date.now() - startedAt);
@@ -315,11 +332,47 @@ async function backfillBreadth(client: KrxClient) {
   }
 }
 
+// 종목 순위 과거 채우기 (T-113): 순위는 시장 폭과 같은 응답에서 나오므로, 순위가 빠진 날짜만 다시 받는다
+// (시장 폭은 같은 값으로 덮어쓰여 변화 없음). 저장 범위를 확인하지 못하면 다음 주기로 미룬다 (SEC-014). 프로세스당 한 번.
+let loggedRankingsCoverageUnavailable = false;
+
+async function backfillRankings(client: KrxClient) {
+  if (BACKFILL_DAYS <= BREADTH_RECENT_DAYS) return;
+  const pending = BREADTH_ENDPOINT_LIST.filter(endpoint => !backfilled.has(`rank:${endpoint}`) && isEnabled(endpoint));
+  if (stopping || pending.length === 0) return;
+
+  const coverage = await fetchRankingsCoverage(pending.map(endpoint => BREADTH_ENDPOINTS[endpoint].market));
+  if (!coverage) {
+    if (!loggedRankingsCoverageUnavailable) console.warn('[krx] stored rankings range unavailable from backend; backfill postponed to the next cycle');
+    loggedRankingsCoverageUnavailable = true;
+    return;
+  }
+
+  const recent = seoulWeekdays(Date.now(), BREADTH_RECENT_DAYS);
+  const target = seoulWeekdays(Date.now(), BACKFILL_DAYS).slice(0, -recent.length);
+  for (const endpoint of pending) {
+    if (stopping) return;
+    const stored = coverage.get(BREADTH_ENDPOINTS[endpoint].market) ?? null;
+    const dates = missingDates(target, stored);
+    if (dates.length === 0) {
+      backfilled.add(`rank:${endpoint}`);
+      console.log(`[krx] ${endpoint} rankings backfill skipped: already stored ${stored?.earliest}-${stored?.latest}`);
+      continue;
+    }
+    const startedAt = Date.now();
+    const ok = await collectBreadthDays(client, dates, [endpoint]);
+    if (!isEnabled(endpoint)) continue;
+    backfilled.add(`rank:${endpoint}`);
+    console.log(`[krx] ${endpoint} rankings backfill ${ok ? 'done' : 'finished with errors'}: ${dates.length} of ${target.length} trade days (stored ${stored ? `${stored.earliest}-${stored.latest}` : 'none'}) in ${Math.round((Date.now() - startedAt) / 1000)}s`);
+  }
+}
+
 async function loop(client: KrxClient) {
   if (stopping) return;
   await backfill(client);
   await backfillHistory(client);
   await backfillBreadth(client);
+  await backfillRankings(client);
   // 시장 폭은 자체 정지(거부·제한)로 보호하므로, 결과를 지수 수집의 재시도 간격(백오프)에 섞지 않는다
   await collectBreadthDays(client, seoulWeekdays(Date.now(), BREADTH_RECENT_DAYS), BREADTH_ENDPOINT_LIST);
   const ok = await collectDays(client, seoulWeekdays(Date.now(), RECENT_DAYS), ENDPOINTS);

@@ -7,6 +7,7 @@ import { parseInvestorFlow, type InvestorFlow } from '../../shared/flows.js';
 import { parseDisclosure, type Disclosure } from '../../shared/disclosures.js';
 import { isKrxDailySymbol, isKrxHistorySymbol } from '../../shared/krx-indices.js';
 import { parseMarketBreadth, type MarketBreadth } from '../../shared/breadth.js';
+import { parseStockRankings, type StockRankings } from '../../shared/rankings.js';
 import type { EachBatchPayload } from 'kafkajs';
 import { runBackfillOnce, runDailyHistoryBackfill } from './backfill.js';
 import { registerShutdown } from '../shutdown.js';
@@ -40,7 +41,7 @@ const dbRawOldestAge = new Gauge('kospi_db_raw_oldest_age_seconds', 'Age of the 
 const DB_SIZE_INTERVAL_MS = 5 * 60 * 1000;
 const DAILY_HISTORY_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // 11단계·12단계·T-67에서 추가한 테이블 (용량·청크·행 수 기록). 이름은 고정 목록이고 매개변수로만 SQL에 넘긴다.
-const EXTRA_TABLES = ['investor_flows', 'index_daily', 'disclosures', 'market_breadth'];
+const EXTRA_TABLES = ['investor_flows', 'index_daily', 'disclosures', 'market_breadth', 'stock_rankings'];
 const dbRows = new Gauge('kospi_db_rows', 'Row count of the smaller hypertables added in stages 11-12 (investor_flows, index_daily, disclosures)');
 
 // 여러 행을 INSERT 한 번으로 저장한다 (P-16). 단일 문장이라 전부 들어가거나 전부 실패한다.
@@ -228,6 +229,77 @@ async function handleBreadthBatch({ batch, resolveOffset, heartbeat }: EachBatch
   await heartbeat();
 }
 
+// 종목 순위 저장 (T-113). 시장·날짜 단위로 통째로 바꾼다(다시 받은 날 순위에서 빠진 종목이 남지 않게).
+// 지우기와 넣기를 한 트랜잭션으로 해서, 실패하면 이전 순위가 그대로 남는다.
+const rankingRowsReplaced = new Counter('kospi_sink_ranking_rows_replaced_total', 'Stock ranking rows written (each market-day is replaced as a whole)');
+
+async function replaceRankings(item: StockRankings) {
+  const client = await dbPool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM stock_rankings WHERE market = $1 AND time = to_timestamp($2 / 1000.0)`, [item.market, item.time]);
+    const values: unknown[] = [item.time, item.market];
+    const rows = item.entries.map((entry, index) => {
+      const base = 2 + index * 10;
+      values.push(entry.code, entry.name, entry.close, entry.changeRate, entry.tradingValue, entry.marketCap,
+        entry.ranks.gain ?? null, entry.ranks.loss ?? null, entry.ranks.value ?? null, entry.ranks.cap ?? null);
+      return `(to_timestamp($1 / 1000.0), $2, $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, 'krx')`;
+    });
+    const result = await client.query(
+      `INSERT INTO stock_rankings (time, market, code, name, close, change_rate, trading_value, market_cap, rank_gain, rank_loss, rank_value, rank_cap, source)
+       VALUES ${rows.join(', ')}`,
+      values
+    );
+    await client.query('COMMIT');
+    return result.rowCount ?? 0;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// 종목 순위 묶음 처리. 다른 토픽과 같은 규칙: 잘못된 메시지는 DLQ, 저장에 성공한 뒤에만 오프셋 확정.
+async function handleRankingsBatch({ batch, resolveOffset, heartbeat }: EachBatchPayload) {
+  const valid: StockRankings[] = [];
+  for (const message of batch.messages) {
+    const parsed = parseStockRankings(message.value);
+    if (!parsed.ok) {
+      invalidTotal.inc({ reason: `rankings_${parsed.reason}` });
+      console.warn(`DB sink skipped invalid rankings message at ${batch.topic}[${batch.partition}]@${message.offset}: ${parsed.reason}`);
+      await sendToDlq(dlqProducer, { consumer: CONSUMER_NAME, topic: batch.topic, partition: batch.partition, message, reason: parsed.reason });
+      continue;
+    }
+    valid.push(parsed.rankings);
+  }
+  // 같은 시장·날짜가 묶음에 두 번 있으면 마지막 것만. 예외는 그대로 던져서 오프셋을 확정하지 않는다
+  for (const item of lastByKey(valid, entry => `${entry.market}|${entry.time}`)) {
+    rankingRowsReplaced.inc({}, await replaceRankings(item));
+    await heartbeat();
+  }
+  const lastMessage = batch.messages[batch.messages.length - 1];
+  if (lastMessage) resolveOffset(lastMessage.offset);
+  await heartbeat();
+}
+
+// 데이터 신선도 (15단계 T-112): 데이터셋마다 가장 최근 값이 얼마나 오래됐는지(초). 앱 설정 화면의 파이프라인 상태와 Grafana에 쓴다.
+// 테이블 이름은 고정 목록이다. 비어 있는 데이터셋은 기록하지 않는다(값이 생긴 뒤부터 나타남).
+const dataLatestAge = new Gauge('kospi_db_latest_data_age_seconds', 'Seconds since the newest row of each dataset (market_ticks, index_daily, market_breadth, disclosures, stock_rankings)');
+
+async function recordFreshness() {
+  const { rows } = await dbPool.query<{ dataset: string; age_s: number | null }>(`
+    SELECT 'market_ticks' AS dataset, extract(epoch FROM now() - max(time))::float8 AS age_s FROM market_ticks
+    UNION ALL SELECT 'index_daily', extract(epoch FROM now() - max(time))::float8 FROM index_daily
+    UNION ALL SELECT 'market_breadth', extract(epoch FROM now() - max(time))::float8 FROM market_breadth
+    UNION ALL SELECT 'disclosures', extract(epoch FROM now() - max(first_seen_at))::float8 FROM disclosures
+    UNION ALL SELECT 'stock_rankings', extract(epoch FROM now() - max(time))::float8 FROM stock_rankings
+  `);
+  for (const row of rows) {
+    if (row.age_s !== null) dataLatestAge.set({ dataset: row.dataset }, Math.max(0, Math.round(row.age_s)));
+  }
+}
+
 // 원본과 집계의 용량, 청크 수, 보관·갱신 작업 상태를 기록한다 (B-07, T-31, T-48). 조회 실패는 수집에 영향을 주지 않도록 로그만 남긴다.
 async function recordDbSize() {
   try {
@@ -268,6 +340,7 @@ async function recordDbSize() {
       UNION ALL SELECT 'index_daily', count(*)::text FROM index_daily
       UNION ALL SELECT 'disclosures', count(*)::text FROM disclosures
       UNION ALL SELECT 'market_breadth', count(*)::text FROM market_breadth
+      UNION ALL SELECT 'stock_rankings', count(*)::text FROM stock_rankings
     `);
     for (const row of counts.rows) {
       dbRows.set({ relation: row.relation }, Number(row.rows));
@@ -299,6 +372,7 @@ async function recordDbSize() {
     // 주의: worker가 다시 시작하면 지표마다 마지막 tick을 한 번 다시 보낸다. 장이 닫힌 시간에는 그 시각이 오래전이라
     // 다음 보관 작업(1시간 주기)까지 이 값이 커질 수 있다 (B-22).
     dbRawOldestAge.set({}, Math.round(oldest.rows[0]?.age_s ?? 0));
+    await recordFreshness();
   } catch (error) {
     console.error(`DB size check failed: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -310,7 +384,7 @@ async function run() {
   await ensureTopics();
   await consumer.connect();
   // 그룹이 처음 시작할 때만 토픽의 처음부터 읽는다. 이후에는 커밋된 오프셋부터 이어서 읽는다.
-  await consumer.subscribe({ topics: [TOPICS.ticks, TOPICS.flows, TOPICS.indexDaily, TOPICS.disclosures, TOPICS.breadth], fromBeginning: true });
+  await consumer.subscribe({ topics: [TOPICS.ticks, TOPICS.flows, TOPICS.indexDaily, TOPICS.disclosures, TOPICS.breadth, TOPICS.rankings], fromBeginning: true });
 
   // kafkajs가 스스로 재시작하지 않는 중단이면 종료해서 docker-compose의 restart: on-failure가 다시 띄우게 한다.
   consumer.on(consumer.events.CRASH, event => {
@@ -335,6 +409,10 @@ async function run() {
       }
       if (payload.batch.topic === TOPICS.breadth) {
         await handleBreadthBatch(payload);
+        return;
+      }
+      if (payload.batch.topic === TOPICS.rankings) {
+        await handleRankingsBatch(payload);
         return;
       }
       const { batch, resolveOffset, heartbeat } = payload;

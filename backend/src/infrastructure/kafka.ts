@@ -26,6 +26,9 @@ export const TOPICS = {
   // 시장 폭·거래대금 (T-106): 시장별 하루 1건
   breadth: 'market-breadth',
   breadthDlq: 'market-breadth.dlq',
+  // 종목 순위 (T-113): 시장·날짜마다 1건(4가지 순위의 상위 100개)
+  rankings: 'stock-rankings',
+  rankingsDlq: 'stock-rankings.dlq',
 } as const;
 
 const TICKS_PARTITIONS = Number.parseInt(process.env.KAFKA_TOPIC_PARTITIONS ?? '', 10) || 1;
@@ -68,13 +71,13 @@ export async function ensureTopics() {
             configEntries: [{ name: 'retention.ms', value: String(DLQ_RETENTION_MS) }],
           },
           // KRX 일별 지수·DART 공시도 하루 수백 건 이하라 7일 보관 (DB Sink가 며칠 멈춰도 다시 채울 수 있음)
-          ...[TOPICS.indexDaily, TOPICS.disclosures, TOPICS.breadth].map(topic => ({
+          ...[TOPICS.indexDaily, TOPICS.disclosures, TOPICS.breadth, TOPICS.rankings].map(topic => ({
             topic,
             numPartitions: 1,
             replicationFactor: 1,
             configEntries: [{ name: 'retention.ms', value: String(FLOWS_RETENTION_MS) }],
           })),
-          ...[TOPICS.indexDailyDlq, TOPICS.disclosuresDlq, TOPICS.breadthDlq].map(topic => ({
+          ...[TOPICS.indexDailyDlq, TOPICS.disclosuresDlq, TOPICS.breadthDlq, TOPICS.rankingsDlq].map(topic => ({
             topic,
             numPartitions: 1,
             replicationFactor: 1,
@@ -110,6 +113,7 @@ const DLQ_FOR: Record<string, string> = {
   [TOPICS.indexDaily]: TOPICS.indexDailyDlq,
   [TOPICS.disclosures]: TOPICS.disclosuresDlq,
   [TOPICS.breadth]: TOPICS.breadthDlq,
+  [TOPICS.rankings]: TOPICS.rankingsDlq,
 };
 const dlqTopicFor = (topic: string) => DLQ_FOR[topic] ?? TOPICS.dlq;
 

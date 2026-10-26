@@ -6,6 +6,9 @@ import { DERIVED_SPREADS, isDerivedSymbol, isSubscribableSymbol, isYahooSymbolKe
 import { BREADTH_MARKETS, type BreadthMarket } from '../../shared/breadth.js';
 import type { DerivedSymbol, YahooSymbolKey } from '../../shared/symbols.js';
 import { isKrxDailySymbol, KRX_SECTOR_KEYS, type KrxDailySymbol } from '../../shared/krx-indices.js';
+import { computeMarketRisk, isRiskRange, RISK_BASE, RISK_RANGES, RISK_TARGETS, type RiskRange } from '../../shared/market-risk.js';
+import { isRankingMarket, isRankingType, RANKING_MARKETS, type RankingType } from '../../shared/rankings.js';
+import { isCalendarDate } from '../../shared/disclosure-calendar.js';
 
 // 측정 지표 (docs/Task_ORDER.md T-01, BENCHMARK M-11)
 const historyDuration = new Latency('kospi_history_request_duration_seconds', 'History API response time by result (cache_hit / cache_miss / not_ready / error)');
@@ -164,6 +167,52 @@ async function getBreadth(timeframe: Timeframe) {
   return { data, coverage };
 }
 
+// 시장 연관성·리스크 (15단계 T-110): 코스피와 상대 지표 6종의 1년치 일봉(1년 그래프와 같은 병합 결과)으로 계산한다.
+// 저장하지 않는다. 일봉이라 하루에 한 번 바뀌므로 10분 캐시.
+const RISK_CACHE_TTL_S = 600;
+
+async function getMarketRisk(range: RiskRange) {
+  const symbols = [RISK_BASE, ...RISK_TARGETS.map(target => target.symbol)] as YahooSymbolKey[];
+  const histories = await Promise.all(symbols.map(symbol => getHistory(symbol, '1년')));
+  const series = Object.fromEntries(symbols.map((symbol, index) => [symbol, histories[index] ?? []]));
+  return computeMarketRisk(range, series, Date.now());
+}
+
+// 종목 순위 (15단계 T-113): 시장·순위 종류·날짜(서울)별 상위 100개. 날짜를 주지 않으면 그 시장의 가장 최근 날짜.
+// 순위 종류는 고정 표에서 칼럼 이름을 고른다(사용자 입력으로 SQL을 만들지 않음). coverage는 수집기의 빠진 기간 채우기용(SEC-014 방식).
+const RANKINGS_CACHE_TTL_S = 60;
+const RANK_COLUMNS: Record<RankingType, string> = { gain: 'rank_gain', loss: 'rank_loss', value: 'rank_value', cap: 'rank_cap' };
+
+async function getRankings(market: string, type: RankingType, date: string | undefined) {
+  const column = RANK_COLUMNS[type];
+  const { rows } = await dbPool.query<{ date: string | null }>(
+    date
+      ? `SELECT to_char($2::date, 'YYYY-MM-DD') AS date WHERE EXISTS (SELECT 1 FROM stock_rankings WHERE market = $1 AND (time AT TIME ZONE 'Asia/Seoul')::date = $2::date)`
+      : `SELECT to_char(max(time) AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD') AS date FROM stock_rankings WHERE market = $1`,
+    date ? [market, date] : [market]
+  );
+  const selected = rows[0]?.date ?? null;
+  const items = selected === null ? [] : (await dbPool.query(
+    `SELECT ${column}::int AS rank, code, name, close::float8 AS close, change_rate::float8 AS "changeRate",
+            trading_value::float8 AS "tradingValue", market_cap::float8 AS "marketCap"
+     FROM stock_rankings
+     WHERE market = $1 AND (time AT TIME ZONE 'Asia/Seoul')::date = $2::date AND ${column} IS NOT NULL
+     ORDER BY ${column}`,
+    [market, selected]
+  )).rows;
+  const coverageRows = await dbPool.query<{ market: string; since: string; until: string }>(
+    `SELECT market,
+            to_char(min(time) AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD') AS since,
+            to_char(max(time) AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD') AS until
+     FROM stock_rankings GROUP BY market`
+  );
+  const coverage = Object.fromEntries(RANKING_MARKETS.map(name => {
+    const found = coverageRows.rows.find(row => row.market === name);
+    return [name, found ? { since: found.since, until: found.until } : null];
+  }));
+  return { market, type, date: selected, items, coverage };
+}
+
 // 최근 tick (T-25). 시각은 소스 기준 시각(실시간 tick의 timestamp와 같은 기준)이다.
 async function getRecentTicks(ticker: YahooSymbolKey): Promise<HistoryPoint[]> {
   const { rows } = await dbPool.query<HistoryPoint>(
@@ -257,6 +306,56 @@ export const historyController = async (fastify: FastifyInstance) => {
       historyDuration.observe({ result: 'error' }, Date.now() - startedAt);
       console.error('Error fetching market breadth:', err);
       return reply.code(500).send({ error: 'Failed to fetch market breadth' });
+    }
+  });
+
+  // 종목 순위 (T-113). 시장·종류는 고정 목록, 날짜는 형식과 실제 날짜인지 검사한 뒤 매개변수로만 넘긴다.
+  fastify.get('/api/v1/market/rankings', async (request, reply) => {
+    const startedAt = Date.now();
+    const { market, type, date } = request.query as { market?: string; type?: string; date?: string };
+    if (!isRankingMarket(market) || !isRankingType(type) || (date !== undefined && !isCalendarDate(date))) {
+      return reply.code(400).send({ error: 'market (KOSPI, KOSDAQ), type (gain, loss, value, cap) and an optional date (YYYY-MM-DD) are required' });
+    }
+    try {
+      const cacheKey = `rankings:${market}:${type}:${date ?? 'latest'}`;
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        historyDuration.observe({ result: 'cache_hit' }, Date.now() - startedAt);
+        return JSON.parse(cached);
+      }
+      const payload = await getRankings(market, type, date);
+      await redis.set(cacheKey, JSON.stringify(payload), 'EX', RANKINGS_CACHE_TTL_S);
+      historyDuration.observe({ result: 'cache_miss' }, Date.now() - startedAt);
+      return payload;
+    } catch (err) {
+      historyDuration.observe({ result: 'error' }, Date.now() - startedAt);
+      console.error('Error fetching stock rankings:', err);
+      return reply.code(500).send({ error: 'Failed to fetch stock rankings' });
+    }
+  });
+
+  // 시장 연관성·리스크 (T-110). 기간은 고정 목록(1개월·3개월·1년)만 받는다.
+  fastify.get('/api/v1/market/risk', async (request, reply) => {
+    const startedAt = Date.now();
+    const { range } = request.query as { range?: string };
+    if (!isRiskRange(range)) {
+      return reply.code(400).send({ error: 'a valid range (1개월, 3개월, 1년) is required' });
+    }
+    try {
+      const cacheKey = `market-risk:${range}`;
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        historyDuration.observe({ result: 'cache_hit' }, Date.now() - startedAt);
+        return JSON.parse(cached);
+      }
+      const payload = await getMarketRisk(range);
+      await redis.set(cacheKey, JSON.stringify(payload), 'EX', RISK_CACHE_TTL_S);
+      historyDuration.observe({ result: 'cache_miss' }, Date.now() - startedAt);
+      return payload;
+    } catch (err) {
+      historyDuration.observe({ result: 'error' }, Date.now() - startedAt);
+      console.error('Error computing market risk:', err);
+      return reply.code(500).send({ error: 'Failed to compute market risk' });
     }
   });
 
@@ -387,6 +486,44 @@ export function startHistorySelfCheck() {
       })}`);
     } catch (error) {
       console.error(`[sector-check] failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // 시장 연관성·리스크 (T-110): 기간별 점·짝 수와 계산값만 남긴다(공개 시세에서 계산한 숫자)
+    try {
+      for (const range of Object.keys(RISK_RANGES) as RiskRange[]) {
+        const startedAt = Date.now();
+        const risk = await getMarketRisk(range);
+        console.log(`[risk-check] ${JSON.stringify({
+          range,
+          ms: Date.now() - startedAt,
+          base: risk.base.stats,
+          targets: risk.targets.map(target => ({
+            symbol: target.symbol, points: target.stats.points, periodChange: target.stats.periodChange, volatility: target.stats.volatility,
+            same: target.sameDay, lag: target.lagged,
+          })),
+        })}`);
+      }
+    } catch (error) {
+      console.error(`[risk-check] failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // 종목 순위 (T-113): 시장별 최근 날짜의 순위별 개수·1위 종목코드·저장 범위만 남긴다(공개 정보)
+    try {
+      for (const market of RANKING_MARKETS) {
+        const counts: Record<string, unknown> = {};
+        let date: string | null = null;
+        let coverage: unknown = null;
+        for (const type of Object.keys(RANK_COLUMNS) as RankingType[]) {
+          const result = await getRankings(market, type, undefined);
+          date = result.date;
+          coverage = result.coverage[market];
+          const ranks = result.items.map(item => (item as { rank: number }).rank);
+          counts[type] = { n: ranks.length, first: (result.items[0] as { code?: string } | undefined)?.code ?? null, contiguous: ranks.every((rank, index) => rank === index + 1) };
+        }
+        console.log(`[rankings-check] ${JSON.stringify({ market, date, coverage, counts })}`);
+      }
+    } catch (error) {
+      console.error(`[rankings-check] failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, 60000);
 }
