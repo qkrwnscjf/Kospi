@@ -44,10 +44,10 @@ const HISTORY_CACHE_TTL_S = Number.parseInt(process.env.HISTORY_CACHE_TTL_S ?? '
 // DB 집계 조회 (T-20). B-06에서 Yahoo 직접 호출보다 약 6배 빠르고, "1일" 기간 오류와 0값이 없어서 채택했다.
 async function getHistory(ticker: YahooSymbolKey, timeframe: Timeframe): Promise<HistoryPoint[]> {
   const { view, range } = DB_TIMEFRAMES[timeframe];
-  // 1개월 ~ 1년(1일 봉): 나중에 추가한 지표는 집계가 시작되기 전 날짜를 과거 일봉(index_daily)으로 이어 붙인다 (T-104 ③).
+  // 1개월 ~ 1년(1일 봉): 집계에 없는 날짜를 일봉(index_daily)으로 채운다.
+  // - 나중에 추가한 지표는 집계가 시작되기 전 날짜(T-104 ③), 모든 지표는 스택이 꺼져 있던 날처럼 집계가 빠진 날(T-127).
   // 일봉 출처는 Yahoo(source 'yahoo') 또는 Yahoo가 주지 않는 지표의 KRX(source 'krx', 코스피 200)다. (symbol, time)이 유일해서 날짜당 1행.
-  // - 집계 첫날보다 이전 날짜만 붙이므로 같은 날짜가 두 번 나오지 않는다(집계가 있는 날은 집계가 우선).
-  // - 처음부터 수집한 지표는 일봉 행이 없어 결과가 이전과 같다.
+  // - 그 날짜에 집계 버킷이 있으면 집계가 우선이라 같은 날짜가 두 번 나오지 않는다.
   // - 일봉 시각은 집계 버킷과 같은 기준(UTC 자정)으로 맞춘다. 1일·1주(5분·1시간 봉)는 해상도가 달라 붙이지 않는다.
   if (view === 'market_1d') {
     const { rows } = await dbPool.query<HistoryPoint>(
@@ -59,7 +59,7 @@ async function getHistory(ticker: YahooSymbolKey, timeframe: Timeframe): Promise
          SELECT time_bucket(INTERVAL '1 day', d.time) AS t, d.close
          FROM index_daily d
          WHERE d.symbol = $1 AND d.time >= now() - $2::interval
-           AND d.time < COALESCE((SELECT min(bucket) FROM agg), 'infinity'::timestamptz)
+           AND NOT EXISTS (SELECT 1 FROM agg WHERE agg.bucket = time_bucket(INTERVAL '1 day', d.time))
          UNION ALL
          SELECT bucket AS t, close FROM agg
        ) merged

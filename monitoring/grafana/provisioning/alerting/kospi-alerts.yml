@@ -162,6 +162,8 @@ groups:
       # 원본 보관 작업이 제때 성공하지 못함 (T-48, D-02: 목표 3시간, 작업 주기 1시간)
       # 원본 최고령 나이로 판단하지 않는 이유: 장이 닫힌 시간에 worker가 다시 시작하면 오래된 시각의 마지막 tick이
       # 다시 저장되어, 보관 작업이 정상이어도 다음 실행 전까지 값이 커진다 (B-22).
+      # 지표의 job 레이블은 Prometheus가 수집 대상의 job과 겹치면 exported_job으로 바꿔 저장한다(2026-10-26 확인).
+      # 이전 조건(job=...)은 수집 대상 job("db-sink")과 비교해서 항상 데이터 없음이었다. 두 이름을 모두 받는다.
       - uid: kospi-raw-retention
         title: 원본 보관 작업 지연
         condition: C
@@ -171,7 +173,7 @@ groups:
             datasourceUid: prometheus
             model:
               refId: A
-              expr: max(kospi_db_job_last_success_age_seconds{job="retention:market_ticks"})
+              expr: max(kospi_db_job_last_success_age_seconds{exported_job="retention:market_ticks"} or kospi_db_job_last_success_age_seconds{job="retention:market_ticks"})
               instant: true
           - refId: B
             datasourceUid: __expr__
@@ -315,7 +317,7 @@ groups:
           summary: "DART 오늘 호출 수가 15,000회를 넘었습니다(한도 2만 건 추정). 재시작 반복이나 과거 채우기를 확인하세요."
 
       # ── DB 집계·보관 작업 (docs/Task_ORDER.md 문제점 D3) ──
-      # 지표의 job 레이블은 Prometheus가 수집 대상 레이블과 충돌하면 exported_job으로 바꿀 수 있어서,
+      # 지표의 job 레이블은 Prometheus가 수집 대상 레이블과 충돌해 exported_job으로 바뀌므로(2026-10-26 확인),
       # 레이블 이름으로 거르지 않고 모든 작업을 대상으로 판단한다.
 
       # 집계 갱신·보관 작업이 실패함 (TimescaleDB job_stats의 누적 실패 수가 늘어남)

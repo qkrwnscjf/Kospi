@@ -10,6 +10,8 @@ import { parseMarketBreadth, type MarketBreadth } from '../../shared/breadth.js'
 import { parseStockRankings, type StockRankings } from '../../shared/rankings.js';
 import type { EachBatchPayload } from 'kafkajs';
 import { runBackfillOnce, runDailyHistoryBackfill } from './backfill.js';
+import { clampWindow, mergeWindows, planLateRefresh, POLICY_START_OFFSET_MS, SAFE_RAW_WINDOW_MS, type RefreshWindow } from './late-refresh.js';
+import { runDlqReplay } from './dlq-replay.js';
 import { registerShutdown } from '../shutdown.js';
 
 // DB 적재 컨슈머 (docs/Task_ORDER.md T-12, D-18)
@@ -45,7 +47,8 @@ const EXTRA_TABLES = ['investor_flows', 'index_daily', 'disclosures', 'market_br
 const dbRows = new Gauge('kospi_db_rows', 'Row count of the smaller hypertables added in stages 11-12 (investor_flows, index_daily, disclosures)');
 
 // 여러 행을 INSERT 한 번으로 저장한다 (P-16). 단일 문장이라 전부 들어가거나 전부 실패한다.
-// 실제로 들어간 행 수를 돌려준다. 나머지는 유니크 제약에 걸려 건너뛴 중복이다 (T-15).
+// 실제로 들어간 행 수와, 들어간 행의 시각들(늦은 데이터 보정용, T-128)을 돌려준다.
+// 나머지는 유니크 제약에 걸려 건너뛴 중복이다 (T-15). 중복은 이미 집계에 반영된 값이라 보정 대상이 아니다.
 async function insertBatch(ticks: TickData[]) {
   const values: unknown[] = [];
   const rows = ticks.map((tick, index) => {
@@ -53,12 +56,68 @@ async function insertBatch(ticks: TickData[]) {
     values.push(tick.timestamp, tick.symbol, tick.category, tick.price, tick.changeRate, tick.changePrice, tick.volume ?? null);
     return `(to_timestamp($${base + 1} / 1000.0), $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`;
   });
-  const result = await dbPool.query(
+  const result = await dbPool.query<{ ms: number }>(
     `INSERT INTO market_ticks (time, symbol, category, price, change_rate, change_price, volume) VALUES ${rows.join(', ')}
-     ON CONFLICT (symbol, time) DO NOTHING`,
+     ON CONFLICT (symbol, time) DO NOTHING
+     RETURNING (extract(epoch FROM time) * 1000)::float8 AS ms`,
     values
   );
-  return result.rowCount ?? 0;
+  return { inserted: result.rowCount ?? 0, times: result.rows.map(row => row.ms) };
+}
+
+// 늦은 데이터 보정 (T-128): 정책 범위(최근 2시간) 밖에 새로 저장된 원본이 있으면 그 구간의 5분 봉만 다시 계산한다.
+// 묶음마다 바로 부르지 않고 30초 동안 구간을 합쳐서 한 번 부른다(밀린 메시지를 따라잡는 동안 수백 번 부르지 않게).
+const lateRowsTotal = new Counter('kospi_sink_late_rows_total', 'Raw ticks stored outside the 5m refresh window, by recoverable (yes = re-aggregated, no = older than the safe raw window)');
+const lateRefreshTotal = new Counter('kospi_sink_late_refresh_total', 'Manual 5m aggregate refreshes for late raw ticks, by result');
+const LATE_REFRESH_DELAY_MS = 30_000;
+let pendingLateWindow: RefreshWindow | null = null;
+let lateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let lastUnrecoverableWarnAt = 0;
+
+function scheduleLateRefresh(insertedTimes: number[]) {
+  if (insertedTimes.length === 0) return;
+  const nowMs = Date.now();
+  const oldestInsertedMs = Math.min(...insertedTimes);
+  const { window, unrecoverable } = planLateRefresh(oldestInsertedMs, nowMs);
+  if (!window && !unrecoverable) return;
+  const safeStart = nowMs - SAFE_RAW_WINDOW_MS;
+  const policyStart = nowMs - POLICY_START_OFFSET_MS;
+  const tooOld = insertedTimes.filter(ms => ms < safeStart).length;
+  const late = insertedTimes.filter(ms => ms < policyStart).length;
+  if (late - tooOld > 0) lateRowsTotal.inc({ recoverable: 'yes' }, late - tooOld);
+  if (tooOld > 0) lateRowsTotal.inc({ recoverable: 'no' }, tooOld);
+  // 장이 닫힌 시간에 worker가 다시 시작하면 지표마다 마지막 tick(몇 시간 전)을 다시 보내서 여기에 걸린다(B-22, 무해). 경고는 10분에 한 번만
+  if (unrecoverable && Date.now() - lastUnrecoverableWarnAt > 10 * 60_000) {
+    lastUnrecoverableWarnAt = Date.now();
+    console.warn(`DB sink stored raw ticks older than the safe re-aggregation window (oldest ${new Date(oldestInsertedMs).toISOString()}); those 5m buckets cannot be rebuilt (daily gap fill covers the 1d view)`);
+  }
+  if (!window) return;
+  pendingLateWindow = mergeWindows(pendingLateWindow, window);
+  if (lateRefreshTimer) return;
+  lateRefreshTimer = setTimeout(() => {
+    lateRefreshTimer = undefined;
+    const planned = pendingLateWindow;
+    pendingLateWindow = null;
+    void runLateRefresh(planned);
+  }, LATE_REFRESH_DELAY_MS);
+}
+
+async function runLateRefresh(planned: RefreshWindow | null) {
+  const window = planned ? clampWindow(planned, Date.now()) : null;
+  if (!window) {
+    lateRefreshTotal.inc({ result: 'skipped_unsafe' });
+    return;
+  }
+  const startedAt = Date.now();
+  try {
+    // 집계 이름은 고정값, 시각은 코드가 만든 ISO 문자열이다(외부 입력 없음). 연속 집계 갱신은 트랜잭션 밖에서만 된다.
+    await dbPool.query(`CALL refresh_continuous_aggregate('market_5m', '${new Date(window.start).toISOString()}'::timestamptz, '${new Date(window.end).toISOString()}'::timestamptz)`);
+    lateRefreshTotal.inc({ result: 'ok' });
+    console.log(`DB sink re-aggregated market_5m for late ticks ${new Date(window.start).toISOString()} ~ ${new Date(window.end).toISOString()} in ${Date.now() - startedAt}ms`);
+  } catch (error) {
+    lateRefreshTotal.inc({ result: 'error' });
+    console.error(`DB sink late re-aggregation failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 // 증시 자금 흐름 저장 (docs/Task_ORDER.md 11단계 A, D-47)
@@ -435,7 +494,9 @@ async function run() {
         const startedAt = Date.now();
         let inserted: number;
         try {
-          inserted = await insertBatch(valid);
+          const result = await insertBatch(valid);
+          inserted = result.inserted;
+          scheduleLateRefresh(result.times);
         } catch (error) {
           insertDuration.observe({ result: 'error' }, Date.now() - startedAt);
           // 예외를 던져서 오프셋을 커밋하지 않는다. kafkajs가 같은 묶음을 다시 시도한다 (데이터가 유효하므로 poison이 아님).
@@ -475,6 +536,12 @@ async function run() {
     .finally(() => void recordDbSize());
 
   setInterval(() => void recordDbSize(), DB_SIZE_INTERVAL_MS);
+
+  // DLQ 다시 처리 (T-129): 검증용 스위치로 켰을 때만 한 번 실행한다. 실패해도 적재는 계속한다
+  if (process.env.DLQ_REPLAY === 'true') {
+    console.warn('DLQ_REPLAY=true: replaying DLQ messages that pass the current validation (verification only).');
+    runDlqReplay(dlqProducer).catch(error => console.error(`[dlq-replay] failed: ${error instanceof Error ? error.message : String(error)}`));
+  }
   // 과거 일봉과 실시간 집계 사이의 빈 날을 주기적으로 다시 확인한다 (T-104 ③). 비어 있지 않으면 외부 호출 없음
   setInterval(() => {
     runDailyHistoryBackfill().catch(error => console.error(`Daily history backfill failed: ${error instanceof Error ? error.message : String(error)}`));

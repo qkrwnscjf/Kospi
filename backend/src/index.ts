@@ -47,9 +47,6 @@ fastify.ready(async err => {
   // 연결 성공 여부는 'Gateway Kafka consumer connected.' 로그와 kospi_gateway_kafka_connected 메트릭으로 확인한다.
   initMarketGateway((fastify as any).io);
   fastify.log.info('Market WebSocket handlers registered (Kafka consumer connects in background).');
-
-  // Start background worker for generating dummy tick data -> Kafka
-  // startIngestionWorker().catch(fastify.log.error);
 });
 
 const start = async () => {

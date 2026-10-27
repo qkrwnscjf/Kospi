@@ -101,14 +101,10 @@ export type DerivedSymbol = keyof typeof DERIVED_SPREADS;
 export const isDerivedSymbol = (value: unknown): value is DerivedSymbol =>
   typeof value === 'string' && Object.prototype.hasOwnProperty.call(DERIVED_SPREADS, value);
 
-// Naver 6종의 내부 심볼. Naver 수집은 보류(R-03)이고, 지금은 KRX 일별 시세로 받는다 (T-67, shared/krx-indices.ts).
-// 제공처 심볼 표는 naver-api.ts에 있다.
-export const NAVER_KEYS = ['VKOSPI', 'KRX_SEMI', 'KRX_IT', 'KRX_AUTO', 'KRX_BANK', 'KRX_BIO'] as const;
-
 // 브라우저가 구독할 수 있는 심볼 (docs/security.md SEC-005). 이 목록에 없는 값으로는 방(room)을 만들지 않는다.
 // 증시 자금 흐름 방(`flows:KOSPI`, `flows:KOSDAQ`, 11단계)과 공시 방(`disclosures:KOSPI`, 12단계)도 포함한다.
-// KRX 일별 지수는 표(krx-indices.ts)에 있는 심볼 전체(VKOSPI·섹터 17종, D-66)를 허용한다.
-const SUBSCRIBABLE_SYMBOLS = new Set<string>([...YAHOO_KEYS, ...NAVER_KEYS, ...KRX_DAILY_KEYS, ...FLOW_ROOMS, DISCLOSURE_ROOM]);
+// KRX 일별 지수는 표(krx-indices.ts)에 있는 심볼 전체(VKOSPI·대표 지수 3종·섹터 17종)를 허용한다.
+const SUBSCRIBABLE_SYMBOLS = new Set<string>([...YAHOO_KEYS, ...KRX_DAILY_KEYS, ...FLOW_ROOMS, DISCLOSURE_ROOM]);
 
 export const isSubscribableSymbol = (value: unknown): value is string =>
   typeof value === 'string' && SUBSCRIBABLE_SYMBOLS.has(value);

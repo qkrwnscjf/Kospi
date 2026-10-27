@@ -2,7 +2,7 @@ import YahooFinance from 'yahoo-finance2';
 import { dbPool } from '../db.js';
 import { YAHOO_CATEGORY, YAHOO_DAILY_HISTORY_KEYS, YAHOO_DAILY_SOURCE, YAHOO_KEYS, YAHOO_SYMBOLS } from '../../shared/symbols.js';
 import type { YahooSymbolKey } from '../../shared/symbols.js';
-import { needsDailyHistory, toDailyRows } from './daily-history.js';
+import { GAP_LOOKBACK_DAYS, missingWeekdays, needsDailyHistory, toDailyRows } from './daily-history.js';
 
 // 최초 1회 과거 데이터 채우기 (docs/Task_ORDER.md T-19, R-05, D-06)
 // 연속 집계에는 직접 넣을 수 없어서, 원본(market_ticks)에 종가를 넣고 → 집계를 전체 갱신하고 →
@@ -129,18 +129,36 @@ export async function runBackfillOnce() {
 // 이 지표들을 market_ticks에 넣고 집계를 다시 계산하면, 그 구간의 다른 지표 집계가 지워진다(원본이 이미 없음, D-23).
 // 그래서 과거 일봉은 index_daily(source 'yahoo')에만 넣고 집계는 건드리지 않는다. History API가 그래프에서 이어 붙인다.
 // 지표마다 마지막 일봉과 실시간 집계 첫날 사이가 비어 있을 때만 받는다(needsDailyHistory). 이미 있는 날짜는 건너뛴다.
+// 빠진 날 메우기(T-127): 모든 Yahoo 지표에서 최근 한 달 중 집계·일봉 모두에 없는 평일이 있으면 그 날짜만 채운다(missingWeekdays).
 // db-sink가 시작할 때와 그 뒤 주기적으로 확인한다. 실패한 지표는 다음 확인 때 다시 시도한다.
+const GAP_REFETCH_MS = 20 * 60 * 60 * 1000; // 공휴일처럼 채울 수 없는 빈 날 때문에 같은 지표를 하루 한 번보다 자주 받지 않는다
+const lastGapFetchAt = new Map<YahooSymbolKey, number>();
+const historyKeys = new Set<YahooSymbolKey>(YAHOO_DAILY_HISTORY_KEYS);
+
 export async function runDailyHistoryBackfill() {
-  for (const symbol of YAHOO_DAILY_HISTORY_KEYS) {
-    const { rows: [state] } = await dbPool.query<{ last_daily: number | null; first_agg: number | null }>(
+  for (const symbol of YAHOO_KEYS) {
+    const { rows: [state] } = await dbPool.query<{ last_daily: number | null; first_agg: number | null; first_agg_day: string | null; agg_days: string[] | null; daily_days: string[] | null }>(
       // 마지막 일봉은 출처와 상관없이 본다 (Yahoo가 주지 않는 지표는 KRX 일봉이 있다, T-104 보완)
       `SELECT (SELECT extract(epoch FROM max(time)) * 1000 FROM index_daily WHERE symbol = $1)::float8 AS last_daily,
-              (SELECT extract(epoch FROM min(bucket)) * 1000 FROM market_1d WHERE symbol = $1)::float8 AS first_agg`,
-      [symbol]
+              (SELECT extract(epoch FROM min(bucket)) * 1000 FROM market_1d WHERE symbol = $1)::float8 AS first_agg,
+              (SELECT to_char(min(bucket) AT TIME ZONE 'UTC', 'YYYY-MM-DD') FROM market_1d WHERE symbol = $1) AS first_agg_day,
+              (SELECT array_agg(to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD')) FROM market_1d
+                WHERE symbol = $1 AND bucket >= now() - make_interval(days => $2)) AS agg_days,
+              (SELECT array_agg(to_char(time AT TIME ZONE 'UTC', 'YYYY-MM-DD')) FROM index_daily
+                WHERE symbol = $1 AND time >= now() - make_interval(days => $2)) AS daily_days`,
+      [symbol, GAP_LOOKBACK_DAYS + 1]
     );
-    if (!needsDailyHistory(state?.last_daily ?? null, state?.first_agg ?? null, Date.now())) continue;
+    const now = Date.now();
+    const seam = historyKeys.has(symbol) && needsDailyHistory(state?.last_daily ?? null, state?.first_agg ?? null, now);
+    const gaps = missingWeekdays(state?.agg_days ?? [], state?.daily_days ?? [], state?.first_agg_day ?? null, now);
+    const gapDue = gaps.length > 0 && now - (lastGapFetchAt.get(symbol) ?? 0) >= GAP_REFETCH_MS;
+    if (!seam && !gapDue) continue;
+    if (gapDue) lastGapFetchAt.set(symbol, now);
     try {
-      const rows = toDailyRows(await fetchBars(symbol, '1d', 366), Date.now());
+      const allRows = toDailyRows(await fetchBars(symbol, '1d', 366), now);
+      // 이음매 채우기는 1년치 전부(이미 있는 날짜는 건너뜀), 빠진 날 메우기는 그 날짜만 넣는다(집계가 있는 날의 중복 행을 만들지 않음)
+      const gapSet = new Set(gaps);
+      const rows = seam ? allRows : allRows.filter(row => gapSet.has(new Date(row.time).toISOString().slice(0, 10)));
       let inserted = 0;
       if (rows.length > 0) {
         const values: unknown[] = [];
@@ -157,7 +175,9 @@ export async function runDailyHistoryBackfill() {
         );
         inserted = result.rowCount ?? 0;
       }
-      console.log(`Daily history backfill ${symbol}: ${rows.length} days, ${inserted} inserted`);
+      console.log(seam
+        ? `Daily history backfill ${symbol}: ${rows.length} days, ${inserted} inserted`
+        : `Daily gap fill ${symbol}: missing ${gaps.join(',')} → ${inserted} inserted (others not provided by the source, e.g. holidays)`);
     } catch (error) {
       console.error(`Daily history backfill ${symbol} failed: ${error instanceof Error ? error.message : String(error)}`);
     }

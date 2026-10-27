@@ -1,15 +1,16 @@
 // 심볼 허용 목록 테스트 (docs/Task_ORDER.md T-45, SEC-005)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DERIVED_SPREADS, NAVER_KEYS, YAHOO_DAILY_HISTORY_KEYS, YAHOO_KEYS, isDerivedSymbol, isSubscribableSymbol, isYahooSymbolKey } from '../src/shared/symbols.js';
+import { DERIVED_SPREADS, YAHOO_DAILY_HISTORY_KEYS, YAHOO_KEYS, isDerivedSymbol, isSubscribableSymbol, isYahooSymbolKey } from '../src/shared/symbols.js';
+import { KRX_DAILY_KEYS } from '../src/shared/krx-indices.js';
 import { parseTick } from '../src/shared/tick-validation.js';
 
-test('알려진 Yahoo 27종 + 이전 Naver 6종만 구독할 수 있다 (D-67: Yahoo 10 → 27, 홍콩·상해·비트코인 제외)', () => {
-  for (const symbol of [...YAHOO_KEYS, ...NAVER_KEYS]) {
+test('알려진 Yahoo 27종 + KRX 일별 21종만 구독할 수 있다 (D-67: Yahoo 10 → 27, 홍콩·상해·비트코인 제외)', () => {
+  for (const symbol of [...YAHOO_KEYS, ...KRX_DAILY_KEYS]) {
     assert.equal(isSubscribableSymbol(symbol), true, symbol);
   }
   assert.equal(YAHOO_KEYS.length, 27);
-  assert.equal(YAHOO_KEYS.length + NAVER_KEYS.length, 33);
+  assert.equal(KRX_DAILY_KEYS.length, 21);
 });
 
 test('과거 일봉으로 채우는 지표는 처음 10종을 뺀 나중 추가 17종이다 (T-104 ③)', () => {
@@ -36,13 +37,13 @@ test('목록에 없는 값, 문자열이 아닌 값, 객체 속성 이름은 거
   assert.equal(isYahooSymbolKey('VKOSPI'), false);
 });
 
-test('Yahoo와 Naver 심볼 이름이 겹치지 않는다', () => {
+test('Yahoo와 KRX 일별 심볼 이름이 겹치지 않는다', () => {
   const yahoo = new Set<string>(YAHOO_KEYS);
-  assert.deepEqual(NAVER_KEYS.filter(key => yahoo.has(key)), []);
+  assert.deepEqual(KRX_DAILY_KEYS.filter(key => yahoo.has(key)), []);
 });
 
 test('구독 가능한 심볼은 모두 Kafka 메시지 검증의 심볼 형식을 통과한다', () => {
-  for (const symbol of [...YAHOO_KEYS, ...NAVER_KEYS]) {
+  for (const symbol of [...YAHOO_KEYS, ...KRX_DAILY_KEYS]) {
     const tick = { symbol, category: 'domestic', price: 1, changeRate: 0, timestamp: 1 };
     assert.equal(parseTick(Buffer.from(JSON.stringify(tick))).ok, true, symbol);
   }

@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { KRX_DAILY_KEYS, KRX_SECTOR_KEYS, isKrxDailySymbol, symbolForIndexName } from '../src/shared/krx-indices.js';
-import { NAVER_KEYS, isSubscribableSymbol } from '../src/shared/symbols.js';
+import { isSubscribableSymbol } from '../src/shared/symbols.js';
 import { closeTimestamp, combineCoverage, mapIndexRows, missingDates, parseKrxNumber, seoulWeekdays, FIELDS } from '../src/infrastructure/krx/krx-index-daily.js';
 import { backfillRanges } from '../src/infrastructure/disclosures/dart-disclosures.js';
 import { DISCLOSURE_ROOM, parseDisclosure } from '../src/shared/disclosures.js';
@@ -11,8 +11,8 @@ import { classifyReport, mapListItem, parseAmount, sumAmountFields } from '../sr
 import { DartApiError, DartClient } from '../src/infrastructure/disclosures/dart-client.js';
 import { KrxApiError, KrxClient } from '../src/infrastructure/krx/krx-client.js';
 
-test('KRX 일별 지수: 기존 Naver 6종을 모두 포함하고, 섹터 17종이며, 모두 구독 허용 목록에 있다 (D-66)', () => {
-  for (const key of NAVER_KEYS) assert.ok(KRX_DAILY_KEYS.includes(key), key);
+test('KRX 일별 지수: 예전 Naver 6종 카드 심볼을 모두 포함하고, 섹터 17종이며, 모두 구독 허용 목록에 있다 (D-66)', () => {
+  for (const key of ['VKOSPI', 'KRX_SEMI', 'KRX_IT', 'KRX_AUTO', 'KRX_BANK', 'KRX_BIO'] as const) assert.ok(KRX_DAILY_KEYS.includes(key), key);
   assert.equal(KRX_SECTOR_KEYS.length, 17);
   for (const key of KRX_DAILY_KEYS) {
     assert.equal(isSubscribableSymbol(key), true, key);

@@ -1,5 +1,4 @@
 import { fetchYahooData } from './yahoo-api.js';
-import { fetchNaverData } from './naver-api.js';
 import type { NormalizedMarketData } from './normalizer.js';
 import { MARKETS, YAHOO_MARKET, decideMarketStatus } from './market-hours.js';
 import { YAHOO_KEYS, isYahooSymbolKey } from '../../shared/symbols.js';
@@ -24,8 +23,6 @@ const IDLE_POLLING_INTERVAL_MS = readIntEnv('IDLE_POLLING_INTERVAL_MS', 60000);
 const HOLIDAY_POLLING_INTERVAL_MS = readIntEnv('HOLIDAY_POLLING_INTERVAL_MS', 15000);
 // 검증용: 장 시간을 판단할 때만 시계를 옮긴다(기본 0). 실제 수집 시각과 데이터에는 영향이 없다 (T-07)
 const MARKET_CLOCK_OFFSET_MS = Number.parseInt(process.env.MARKET_CLOCK_OFFSET_MS ?? '', 10) || 0;
-// Naver 수집은 보류 중(R-03)이라 기본값은 끔. "true"일 때만 수집한다 (docs/Task_ORDER.md T-10, D-15)
-const NAVER_ENABLED = process.env.NAVER_ENABLED === 'true';
 // 검증용: true이면 시작할 때 잘못된 메시지 2건을 한 번 보낸다(기본 끔). 컨슈머 방어(T-13)를 확인하기 위함
 const KAFKA_TEST_INJECT_INVALID = process.env.KAFKA_TEST_INJECT_INVALID === 'true';
 // 검증용: true이면 변경 감지(T-06)를 건너뛰고 매 주기 모두 전송한다(기본 끔).
@@ -77,7 +74,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 }
 
 // Yahoo는 timestamp에 소스 기준 시각(regularMarketTime)을 넣으므로, 이 값이 바뀌는 간격이 곧 소스 갱신 주기다.
-// Naver는 수집 시각(Date.now())을 넣기 때문에 측정 대상에서 제외한다.
 function trackSourceUpdate(item: NormalizedMarketData) {
   const previous = lastSourceTimestamp.get(item.ticker);
   lastSourceTimestamp.set(item.ticker, item.timestamp);
@@ -92,7 +88,6 @@ function trackSourceUpdate(item: NormalizedMarketData) {
 }
 
 // 소스별 응답 시간과 수집 시각을 기록한다. 결과는 success / empty(0건) / timeout / error로 나눈다 (T-04, T-05).
-// Naver 어댑터는 아직 에러를 삼키고 []를 반환하므로, Naver의 에러는 empty로 집계된다.
 async function collect(
   source: string,
   fetcher: () => Promise<NormalizedMarketData[]>
@@ -123,25 +118,18 @@ async function collect(
     result,
     items: items.map(item => {
       collectLag.observe({ symbol: item.ticker }, collectedAt - item.timestamp);
-      if (source === 'yahoo') {
-        trackSourceUpdate(item);
-      }
+      trackSourceUpdate(item);
       return { ...item, collectedAt };
     }),
   };
 }
 
-// 수집 1회: 외부 API 조회 → DB 적재 → Kafka 전송. Yahoo 수집 결과를 돌려준다 (백오프 판단용).
+// 수집 1회: Yahoo 조회 → Kafka 전송. Yahoo 수집 결과를 돌려준다 (백오프 판단용).
 async function runCycle(): Promise<FetchResult> {
   console.log(`\n[${new Date().toISOString()}] Fetching market data...`);
 
-  // 두 요청을 먼저 모두 시작한 뒤 기다린다 (동시 수집). Naver는 켜져 있을 때만 요청한다 (T-10).
-  const yahooPromise = collect('yahoo', fetchYahooData);
-  const naverPromise = NAVER_ENABLED ? collect('naver', fetchNaverData) : undefined;
-  const yahoo = await yahooPromise;
-  const naver = naverPromise ? await naverPromise : undefined;
-
-  const allData = [...yahoo.items, ...(naver?.items ?? [])];
+  const yahoo = await collect('yahoo', fetchYahooData);
+  const allData = yahoo.items;
 
   // 소스 장 상태 기록 (T-56)
   for (const item of yahoo.items) {
@@ -207,9 +195,6 @@ async function runCycle(): Promise<FetchResult> {
         if (data.marketState) lastSentMarketState.set(data.ticker, data.marketState);
         tickTotal.inc({ symbol: data.ticker, result: 'sent' });
       }
-
-      // 콘솔 출력 테스트 (상위 3개만)
-      console.log('Sample Data Sent:', freshData.slice(0, 3).map(d => d.ticker));
     }
   } catch (error) {
     // Kafka 전송 실패는 백오프하지 않는다 (외부 API 보호가 백오프의 목적)
@@ -223,7 +208,6 @@ async function runCycle(): Promise<FetchResult> {
 // - 이전 수집이 끝난 뒤에만 다음 수집을 예약하므로 겹쳐서 실행되지 않는다.
 // - 정상일 때는 수집 시작 시각 기준으로 POLLING_INTERVAL_MS 간격을 유지한다.
 // - Yahoo 수집이 실패하면 대기 시간을 2배씩 늘린다 (상한 MAX_BACKOFF_MS). 성공하면 바로 원래 간격으로 돌아온다.
-//   Naver는 보류 중(R-03)이고 항상 0건이라 판단에서 제외한다.
 let consecutiveFailures = 0;
 let lastCycleStartedAt: number | undefined;
 let lastMarketSummary: string | undefined;
@@ -308,7 +292,6 @@ async function stopPolling() {
 async function runIngestionWorker() {
   console.log('🚀 Data Ingestion Worker Started...');
   console.log(`Polling interval: ${POLLING_INTERVAL_MS}ms, fetch timeout: ${FETCH_TIMEOUT_MS}ms, max backoff: ${MAX_BACKOFF_MS}ms`);
-  console.log(`Naver collection: ${NAVER_ENABLED ? 'enabled' : 'disabled (on hold, R-03)'}`);
   console.log(`Idle polling interval (all markets closed): ${IDLE_POLLING_INTERVAL_MS}ms, holiday interval (source closed during market hours): ${HOLIDAY_POLLING_INTERVAL_MS}ms`);
   if (MARKET_CLOCK_OFFSET_MS !== 0) {
     console.warn(`MARKET_CLOCK_OFFSET_MS=${MARKET_CLOCK_OFFSET_MS}: market hours are evaluated on a shifted clock (verification only).`);

@@ -43,6 +43,9 @@ const flowPipelineLatency = new Latency('kospi_gateway_flow_pipeline_latency_sec
 const dailyMessagesTotal = new Counter('kospi_gateway_daily_index_messages_total', 'KRX daily index messages emitted by the gateway');
 const disclosureMessagesTotal = new Counter('kospi_gateway_disclosure_messages_total', 'Live DART disclosures emitted by the gateway');
 
+// DLQ 다시 처리 (T-129)
+const replayedSkippedTotal = new Counter('kospi_gateway_replayed_skipped_total', 'Messages replayed from a DLQ, skipped by the gateway (storage only)');
+
 const RECONNECT_INITIAL_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 const CONSUMER_NAME = 'gateway';
@@ -54,6 +57,11 @@ const dlqProducer = kafka.producer();
 // 이 핸들러는 예외를 던지지 않는다. 던지면 kafkajs가 같은 메시지를 계속 다시 시도해서 실시간 경로 전체가 멈춘다 (SEC-002).
 const handleMessage = (io: Server) => async ({ topic, partition, message }: EachMessagePayload) => {
   const consumedAt = Date.now();
+  // DLQ에서 되돌린 메시지(T-129)는 저장용이다. 지난 값이라 화면에 보내거나 최신값 캐시를 덮어쓰지 않는다
+  if (message.headers?.['replayed-from'] !== undefined) {
+    replayedSkippedTotal.inc();
+    return;
+  }
   if (topic === TOPICS.flows) {
     await handleFlowMessage(io, topic, partition, message, consumedAt);
     return;

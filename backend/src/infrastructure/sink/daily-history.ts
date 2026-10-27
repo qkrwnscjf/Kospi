@@ -47,6 +47,34 @@ function weekdaysBetween(from: string, to: string) {
 // 집계가 시작된 뒤 이 기간까지만 이음매의 빈 날을 다시 확인한다 (공휴일 때문에 끝없이 다시 받지 않도록)
 export const GAP_FILL_DAYS = 14;
 
+// ── 빠진 날 메우기 (docs/Task_ORDER.md T-127, D-74) ──
+// 스택이 꺼져 있던 날은 실시간 집계(market_1d)에 그 날짜 봉이 없다(원본이 3시간 뒤 지워져 다시 만들 수도 없음).
+// 최근 GAP_LOOKBACK_DAYS일 중 집계에도 일봉(index_daily)에도 없는 평일을 찾아, 그 날짜만 Yahoo 일봉으로 index_daily에 넣는다.
+// 집계는 다시 계산하지 않는다(저장 불변 조건). 공휴일은 Yahoo에도 봉이 없어 채워지지 않으므로, 같은 지표는 하루 한 번만 다시 확인한다.
+export const GAP_LOOKBACK_DAYS = 30;
+// 최근 이틀은 Yahoo가 일봉을 아직 확정하지 않았을 수 있고 실시간 집계도 만들어지는 중이라 보지 않는다
+export const GAP_MIN_AGE_DAYS = 2;
+
+const isoDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+// 집계 버킷과 일봉의 날짜(UTC 날짜 YYYY-MM-DD, 일봉 시각 15:30 KST = 06:30 UTC라 거래일과 같음)를 받아 빠진 평일을 돌려준다.
+// 집계가 시작된 날(firstAggDay) 이전은 위의 이음매 규칙(needsDailyHistory)이 맡으므로 보지 않는다.
+export function missingWeekdays(aggDays: Iterable<string>, dailyDays: Iterable<string>, firstAggDay: string | null, nowMs: number,
+  lookbackDays = GAP_LOOKBACK_DAYS, minAgeDays = GAP_MIN_AGE_DAYS): string[] {
+  if (firstAggDay === null) return [];
+  const present = new Set<string>([...aggDays, ...dailyDays]);
+  const todayStart = Math.floor(nowMs / 86_400_000) * 86_400_000;
+  const missing: string[] = [];
+  for (let back = lookbackDays; back >= minAgeDays; back -= 1) {
+    const ms = todayStart - back * 86_400_000;
+    const day = isoDay(ms);
+    const weekday = new Date(ms).getUTCDay();
+    if (weekday === 0 || weekday === 6 || day < firstAggDay || present.has(day)) continue;
+    missing.push(day);
+  }
+  return missing;
+}
+
 // 과거 일봉을 (다시) 받아야 하는지. 빠진 것만 채운다(SEC-014와 같은 원칙).
 // - 실시간 집계가 시작된 지 GAP_FILL_DAYS일이 지났으면 받지 않는다(Yahoo가 일봉을 주지 않는 지표도 여기서 멈춤).
 // - 일봉이 아직 없거나 집계가 아직 없으면 받는다(그동안 거래일이 지나가면 이음매에 빈 날이 생김).

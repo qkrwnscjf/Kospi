@@ -1,7 +1,7 @@
 // 나중에 추가한 Yahoo 지표의 과거 일봉 테스트 (docs/Task_ORDER.md T-104 ③, D-67)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GAP_FILL_DAYS, needsDailyHistory, toDailyRows } from '../src/infrastructure/sink/daily-history.js';
+import { GAP_FILL_DAYS, missingWeekdays, needsDailyHistory, toDailyRows } from '../src/infrastructure/sink/daily-history.js';
 import { closeTimestamp } from '../src/infrastructure/krx/krx-index-daily.js';
 
 const bar = (iso: string, price: number) => ({ time: new Date(iso), price, changeRate: 1, changePrice: 2 });
@@ -46,6 +46,16 @@ test(`needsDailyHistory: 집계가 시작된 지 ${GAP_FILL_DAYS}일이 지나�
   const later = firstAgg + (GAP_FILL_DAYS + 1) * 86_400_000;
   assert.equal(needsDailyHistory(null, firstAgg, later), false);
   assert.equal(needsDailyHistory(closeTimestamp('20260925'), firstAgg, later), false);
+});
+
+test('missingWeekdays: 집계·일봉 모두에 없는 평일만, 주말·최근 이틀·집계 시작 전은 빼고 (T-127)', () => {
+  const now = Date.parse('2026-10-27T03:00:00Z'); // 화요일
+  const agg = ['2026-10-14', '2026-10-15', '2026-10-16', '2026-10-19', '2026-10-21', '2026-10-22'];
+  const daily = ['2026-10-23'];
+  // 10/20(화) 빠짐. 10/23은 일봉으로 있음. 10/26(월)·10/27(화)은 최근 이틀이라 보지 않음. 10/13 이전은 집계 시작 전
+  assert.deepEqual(missingWeekdays(agg, daily, '2026-10-14', now), ['2026-10-20']);
+  assert.deepEqual(missingWeekdays(agg, [], '2026-10-14', now), ['2026-10-20', '2026-10-23']);
+  assert.deepEqual(missingWeekdays([], [], null, now), []); // 집계가 없으면 이음매 규칙이 맡음
 });
 
 test('같은 날짜가 두 번 오면 마지막 값을 쓰고, 날짜 순으로 정렬한다', () => {

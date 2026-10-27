@@ -10,7 +10,3 @@ export interface NormalizedMarketData {
   volume?: number;
   marketState?: MarketState; // 소스의 장 상태 (T-56). 없으면 시간표로만 판단한다
 }
-
-export function normalizeData(data: NormalizedMarketData): NormalizedMarketData {
-  return data;
-}
